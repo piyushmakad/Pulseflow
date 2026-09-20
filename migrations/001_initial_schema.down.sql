@@ -1,0 +1,6 @@
+DROP TABLE IF EXISTS outbox;
+DROP TABLE IF EXISTS delivery_attempts;
+DROP TABLE IF EXISTS notification_rules;
+DROP TABLE IF EXISTS events;
+DROP TABLE IF EXISTS api_keys;
+DROP TABLE IF EXISTS tenants;
