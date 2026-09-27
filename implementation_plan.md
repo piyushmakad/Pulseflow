@@ -678,6 +678,8 @@ pulseflow/
 │   └── pulseflow/
 │       └── main.go                 # Entrypoint, dependency wiring, mode selection
 ├── internal/
+│   ├── admin/
+│   │   └── provision.go            # One-shot tenant + API-key provisioning
 │   ├── api/
 │   │   ├── server.go               # HTTP server lifecycle
 │   │   ├── router.go               # Route registration
@@ -685,9 +687,11 @@ pulseflow/
 │   │   │   ├── auth.go             # API key validation
 │   │   │   ├── ratelimit.go        # Token bucket rate limiter
 │   │   │   └── requestid.go        # X-Request-ID injection
-│   │   └── handler/
+│   │   ├── handler/
 │   │       ├── event.go            # POST/GET /v1/events
 │   │       └── health.go           # /healthz, /readyz
+│   │   └── response/
+│   │       └── response.go         # JSON response/error envelopes
 │   ├── domain/
 │   │   ├── event.go                # Event model + state machine
 │   │   ├── tenant.go               # Tenant model
@@ -701,6 +705,7 @@ pulseflow/
 │   │   │   ├── outbox_repo.go      # Leased outbox claim/release/publish
 │   │   │   └── migrations/         # SQL migration files
 │   │   └── redis/
+│   │       ├── store.go            # Redis connection lifecycle
 │   │       ├── ratelimiter.go      # Token bucket rate limiter
 │   │       └── cache.go            # API key cache
 │   ├── queue/

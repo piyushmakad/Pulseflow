@@ -15,31 +15,33 @@ type Config struct {
 	HTTPReadTimeout  time.Duration `json:"http_read_timeout"`
 	HTTPWriteTimeout time.Duration `json:"http_write_timeout"`
 	HTTPIdleTimeout  time.Duration `json:"http_idle_timeout"`
+	HTTPMaxBodyBytes int           `json:"http_max_body_bytes"`
 
 	// PostgreSQL
 	DatabaseURL     string `json:"database_url"`
 	DatabaseMaxConn int    `json:"database_max_conn"`
 
 	// Redis
-	RedisURL string `json:"redis_url"`
+	RedisURL       string        `json:"redis_url"`
+	APIKeyCacheTTL time.Duration `json:"api_key_cache_ttl"`
 
 	// Kafka
-	KafkaBrokers        string `json:"kafka_brokers"`
-	KafkaEventsTopic    string `json:"kafka_events_topic"`
+	KafkaBrokers         string `json:"kafka_brokers"`
+	KafkaEventsTopic     string `json:"kafka_events_topic"`
 	KafkaDeadLetterTopic string `json:"kafka_deadletter_topic"`
-	KafkaConsumerGroup  string `json:"kafka_consumer_group"`
+	KafkaConsumerGroup   string `json:"kafka_consumer_group"`
 
 	// Outbox relay
 	OutboxPollInterval time.Duration `json:"outbox_poll_interval"`
 	OutboxBatchSize    int           `json:"outbox_batch_size"`
 
 	// Worker pools
-	WebhookWorkerCount  int           `json:"webhook_worker_count"`
-	WebhookBufferSize   int           `json:"webhook_buffer_size"`
-	WebhookTimeout      time.Duration `json:"webhook_timeout"`
-	EmailWorkerCount    int           `json:"email_worker_count"`
-	EmailBufferSize     int           `json:"email_buffer_size"`
-	EmailTimeout        time.Duration `json:"email_timeout"`
+	WebhookWorkerCount int           `json:"webhook_worker_count"`
+	WebhookBufferSize  int           `json:"webhook_buffer_size"`
+	WebhookTimeout     time.Duration `json:"webhook_timeout"`
+	EmailWorkerCount   int           `json:"email_worker_count"`
+	EmailBufferSize    int           `json:"email_buffer_size"`
+	EmailTimeout       time.Duration `json:"email_timeout"`
 
 	// Rate limiting
 	RateLimitRequests int           `json:"rate_limit_requests"`
@@ -65,13 +67,15 @@ func Load() (*Config, error) {
 		HTTPReadTimeout:  envDuration("HTTP_READ_TIMEOUT", 10*time.Second),
 		HTTPWriteTimeout: envDuration("HTTP_WRITE_TIMEOUT", 30*time.Second),
 		HTTPIdleTimeout:  envDuration("HTTP_IDLE_TIMEOUT", 60*time.Second),
+		HTTPMaxBodyBytes: envInt("HTTP_MAX_BODY_BYTES", 1<<20),
 
 		// PostgreSQL defaults
 		DatabaseURL:     envStr("DATABASE_URL", "postgres://pulseflow:pulseflow@localhost:5432/pulseflow?sslmode=disable"),
 		DatabaseMaxConn: envInt("DATABASE_MAX_CONN", 25),
 
 		// Redis defaults
-		RedisURL: envStr("REDIS_URL", "redis://localhost:6379/0"),
+		RedisURL:       envStr("REDIS_URL", "redis://localhost:6379/0"),
+		APIKeyCacheTTL: envDuration("API_KEY_CACHE_TTL", 60*time.Second),
 
 		// Kafka defaults
 		KafkaBrokers:         envStr("KAFKA_BROKERS", "localhost:9092"),
@@ -120,6 +124,15 @@ func (c *Config) validate() error {
 	}
 	if c.DatabaseURL == "" {
 		return fmt.Errorf("DATABASE_URL is required")
+	}
+	if c.HTTPMaxBodyBytes < 1 {
+		return fmt.Errorf("HTTP_MAX_BODY_BYTES must be >= 1")
+	}
+	if c.APIKeyCacheTTL <= 0 {
+		return fmt.Errorf("API_KEY_CACHE_TTL must be > 0")
+	}
+	if c.RateLimitRequests < 1 || c.RateLimitWindow <= 0 {
+		return fmt.Errorf("rate limit requests and window must be positive")
 	}
 	if c.KafkaBrokers == "" {
 		return fmt.Errorf("KAFKA_BROKERS is required")

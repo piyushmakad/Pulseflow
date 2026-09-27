@@ -27,6 +27,9 @@ func (s *Store) CreateEvent(ctx context.Context, p CreateEventParams) (domain.Ev
 	if strings.TrimSpace(p.TenantID) == "" || strings.TrimSpace(p.Type) == "" || strings.TrimSpace(p.IdempotencyKey) == "" {
 		return domain.Event{}, false, domain.NewValidationError("event", "tenant_id, type, and idempotency_key are required")
 	}
+	if len(p.Type) > 255 || len(p.IdempotencyKey) > 255 || len(p.Topic) > 255 {
+		return domain.Event{}, false, domain.NewValidationError("event", "type, idempotency_key, and topic must be at most 255 characters")
+	}
 	if !json.Valid(p.Data) {
 		return domain.Event{}, false, domain.NewValidationError("data", "must be valid JSON")
 	}

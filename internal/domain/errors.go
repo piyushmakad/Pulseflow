@@ -22,6 +22,9 @@ var (
 	// ErrRateLimited indicates the tenant has exceeded their rate limit.
 	ErrRateLimited = errors.New("rate limited")
 
+	// ErrUnavailable indicates a required durable dependency is temporarily unavailable.
+	ErrUnavailable = errors.New("service unavailable")
+
 	// ErrValidation indicates the request failed validation.
 	ErrValidation = errors.New("validation error")
 )

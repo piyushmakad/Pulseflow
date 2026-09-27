@@ -80,9 +80,12 @@ func mapError(err error) error {
 		switch pgErr.Code {
 		case "23505":
 			return domain.ErrAlreadyExists
-		case "23503", "23514", "22P02":
+		case "23503", "23514", "22P02", "22001":
 			return fmt.Errorf("%w: %s", domain.ErrValidation, pgErr.Message)
 		}
+	}
+	if pgconn.SafeToRetry(err) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %v", domain.ErrUnavailable, err)
 	}
 	return err
 }
