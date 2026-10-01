@@ -2,8 +2,11 @@ package domain
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
+
+const EventMessageVersion = 1
 
 type EventStatus string
 
@@ -57,6 +60,22 @@ type EventMessage struct {
 	Type       string          `json:"type"`
 	Data       json.RawMessage `json:"data"`
 	OccurredAt time.Time       `json:"occurred_at"`
+}
+
+func (m EventMessage) Validate() error {
+	if m.Version != EventMessageVersion {
+		return NewValidationError("version", "unsupported event message version")
+	}
+	if strings.TrimSpace(m.EventID) == "" || strings.TrimSpace(m.TenantID) == "" || strings.TrimSpace(m.Type) == "" {
+		return NewValidationError("event_message", "event_id, tenant_id, and type are required")
+	}
+	if !json.Valid(m.Data) {
+		return NewValidationError("data", "must be valid JSON")
+	}
+	if m.OccurredAt.IsZero() {
+		return NewValidationError("occurred_at", "is required")
+	}
+	return nil
 }
 
 type OutboxStatus string

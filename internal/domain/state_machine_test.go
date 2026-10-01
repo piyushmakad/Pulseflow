@@ -1,8 +1,10 @@
 package domain
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestEventStatusTransitions(t *testing.T) {
@@ -33,6 +35,29 @@ func TestEventStatusTransitions(t *testing.T) {
 				t.Fatalf("expected ErrInvalidStateTransition, got %v", err)
 			}
 		})
+	}
+}
+
+func TestEventMessageValidation(t *testing.T) {
+	t.Parallel()
+	valid := EventMessage{
+		Version: EventMessageVersion, EventID: "event-1", TenantID: "tenant-1",
+		Type: "order.created", Data: json.RawMessage(`{"order_id":"123"}`), OccurredAt: time.Now(),
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid message rejected: %v", err)
+	}
+
+	invalidVersion := valid
+	invalidVersion.Version++
+	if err := invalidVersion.Validate(); !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected version validation error, got %v", err)
+	}
+
+	invalidData := valid
+	invalidData.Data = json.RawMessage(`not-json`)
+	if err := invalidData.Validate(); !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected data validation error, got %v", err)
 	}
 }
 

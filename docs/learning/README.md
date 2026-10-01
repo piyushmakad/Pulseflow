@@ -14,7 +14,7 @@ The guides separate two things:
 | 1 | Go project foundation and local infrastructure | Implemented |
 | 2 | Domain state machines and PostgreSQL repositories | Implemented |
 | 3 | HTTP API, API-key authentication, and rate limiting | Implemented |
-| 4 | Transactional outbox relay and Kafka routing | Planned |
+| 4 | Transactional outbox relay and Kafka routing | Implemented |
 | 5 | Bounded workers, webhook delivery, retries, and finalization | Planned |
 | 6 | Operational visibility | Planned |
 | 7 | Packaging, deployment, CI, and resilience | Planned |

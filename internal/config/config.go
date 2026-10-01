@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -26,14 +27,17 @@ type Config struct {
 	APIKeyCacheTTL time.Duration `json:"api_key_cache_ttl"`
 
 	// Kafka
-	KafkaBrokers         string `json:"kafka_brokers"`
-	KafkaEventsTopic     string `json:"kafka_events_topic"`
-	KafkaDeadLetterTopic string `json:"kafka_deadletter_topic"`
-	KafkaConsumerGroup   string `json:"kafka_consumer_group"`
+	KafkaBrokers         string        `json:"kafka_brokers"`
+	KafkaEventsTopic     string        `json:"kafka_events_topic"`
+	KafkaDeadLetterTopic string        `json:"kafka_deadletter_topic"`
+	KafkaConsumerGroup   string        `json:"kafka_consumer_group"`
+	KafkaConsumerRetry   time.Duration `json:"kafka_consumer_retry"`
 
 	// Outbox relay
 	OutboxPollInterval time.Duration `json:"outbox_poll_interval"`
 	OutboxBatchSize    int           `json:"outbox_batch_size"`
+	OutboxLease        time.Duration `json:"outbox_lease"`
+	OutboxRetryDelay   time.Duration `json:"outbox_retry_delay"`
 
 	// Worker pools
 	WebhookWorkerCount int           `json:"webhook_worker_count"`
@@ -82,10 +86,13 @@ func Load() (*Config, error) {
 		KafkaEventsTopic:     envStr("KAFKA_EVENTS_TOPIC", "events.ingested"),
 		KafkaDeadLetterTopic: envStr("KAFKA_DEADLETTER_TOPIC", "events.deadletter"),
 		KafkaConsumerGroup:   envStr("KAFKA_CONSUMER_GROUP", "pulseflow-workers"),
+		KafkaConsumerRetry:   envDuration("KAFKA_CONSUMER_RETRY", time.Second),
 
 		// Outbox relay defaults
 		OutboxPollInterval: envDuration("OUTBOX_POLL_INTERVAL", 500*time.Millisecond),
 		OutboxBatchSize:    envInt("OUTBOX_BATCH_SIZE", 100),
+		OutboxLease:        envDuration("OUTBOX_LEASE", 30*time.Second),
+		OutboxRetryDelay:   envDuration("OUTBOX_RETRY_DELAY", 5*time.Second),
 
 		// Worker pool defaults
 		WebhookWorkerCount: envInt("WEBHOOK_WORKER_COUNT", 20),
@@ -134,8 +141,17 @@ func (c *Config) validate() error {
 	if c.RateLimitRequests < 1 || c.RateLimitWindow <= 0 {
 		return fmt.Errorf("rate limit requests and window must be positive")
 	}
-	if c.KafkaBrokers == "" {
-		return fmt.Errorf("KAFKA_BROKERS is required")
+	if len(c.KafkaBrokerAddresses()) == 0 {
+		return fmt.Errorf("KAFKA_BROKERS must contain at least one broker")
+	}
+	if strings.TrimSpace(c.KafkaEventsTopic) == "" || strings.TrimSpace(c.KafkaDeadLetterTopic) == "" || strings.TrimSpace(c.KafkaConsumerGroup) == "" {
+		return fmt.Errorf("Kafka topics and consumer group are required")
+	}
+	if c.KafkaConsumerRetry <= 0 {
+		return fmt.Errorf("KAFKA_CONSUMER_RETRY must be > 0")
+	}
+	if c.OutboxPollInterval <= 0 || c.OutboxBatchSize < 1 || c.OutboxLease <= 0 || c.OutboxRetryDelay <= 0 {
+		return fmt.Errorf("outbox poll interval, batch size, lease, and retry delay must be positive")
 	}
 	if c.WebhookWorkerCount < 1 {
 		return fmt.Errorf("WEBHOOK_WORKER_COUNT must be >= 1")
@@ -144,6 +160,17 @@ func (c *Config) validate() error {
 		return fmt.Errorf("EMAIL_WORKER_COUNT must be >= 1")
 	}
 	return nil
+}
+
+func (c *Config) KafkaBrokerAddresses() []string {
+	parts := strings.Split(c.KafkaBrokers, ",")
+	brokers := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if broker := strings.TrimSpace(part); broker != "" {
+			brokers = append(brokers, broker)
+		}
+	}
+	return brokers
 }
 
 // Environment variable helpers

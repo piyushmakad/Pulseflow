@@ -21,3 +21,6 @@ vendor/
 # Test
 coverage.out
 coverage.html
+
+tmp/
+outputs/

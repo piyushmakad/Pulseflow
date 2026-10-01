@@ -52,6 +52,20 @@ func (s *Store) ListNotificationRules(ctx context.Context, tenantID, eventType s
 // and creates one durable logical delivery per matching rule. Redelivery is
 // safe: processing/terminal events return their existing delivery rows.
 func (s *Store) RouteEvent(ctx context.Context, eventID string, maxAttempts int) ([]domain.DeliveryAttempt, error) {
+	return s.routeEvent(ctx, eventID, nil, maxAttempts)
+}
+
+// RouteEventMessage verifies that the message agrees with the immutable event
+// stored in PostgreSQL before it creates delivery work. This prevents a valid
+// JSON message with a forged tenant, type, payload, or timestamp from routing.
+func (s *Store) RouteEventMessage(ctx context.Context, message domain.EventMessage, maxAttempts int) ([]domain.DeliveryAttempt, error) {
+	if err := message.Validate(); err != nil {
+		return nil, err
+	}
+	return s.routeEvent(ctx, message.EventID, &message, maxAttempts)
+}
+
+func (s *Store) routeEvent(ctx context.Context, eventID string, expected *domain.EventMessage, maxAttempts int) ([]domain.DeliveryAttempt, error) {
 	if maxAttempts < 1 {
 		return nil, domain.NewValidationError("max_attempts", "must be positive")
 	}
@@ -64,6 +78,12 @@ func (s *Store) RouteEvent(ctx context.Context, eventID string, maxAttempts int)
 			       created_at, updated_at, processed_at
 			FROM events WHERE id=$1 FOR UPDATE`, eventID), &event); err != nil {
 			return mapError(err)
+		}
+		if expected != nil && (event.TenantID != expected.TenantID ||
+			event.Type != expected.Type ||
+			!jsonEquivalent(event.Data, expected.Data) ||
+			!event.CreatedAt.Equal(expected.OccurredAt)) {
+			return domain.NewValidationError("event_message", "does not match the persisted event")
 		}
 
 		if event.Status != domain.EventStatusAccepted {

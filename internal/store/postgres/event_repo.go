@@ -63,7 +63,7 @@ func (s *Store) CreateEvent(ctx context.Context, p CreateEventParams) (domain.Ev
 
 		created = true
 		payload, err := json.Marshal(domain.EventMessage{
-			Version:    1,
+			Version:    domain.EventMessageVersion,
 			EventID:    event.ID,
 			TenantID:   event.TenantID,
 			Type:       event.Type,

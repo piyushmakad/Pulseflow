@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,11 +51,15 @@ func TestEventLifecycleIntegration(t *testing.T) {
 		t.Fatalf("expected idempotency conflict, got %v", err)
 	}
 
-	deliveries, err := store.RouteEvent(ctx, event.ID, 5)
+	eventMessage := domain.EventMessage{
+		Version: domain.EventMessageVersion, EventID: event.ID, TenantID: event.TenantID,
+		Type: event.Type, Data: event.Data, OccurredAt: event.CreatedAt,
+	}
+	deliveries, err := store.RouteEventMessage(ctx, eventMessage, 5)
 	if err != nil || len(deliveries) != 1 {
 		t.Fatalf("route event: deliveries=%d err=%v", len(deliveries), err)
 	}
-	deliveries, err = store.RouteEvent(ctx, event.ID, 5)
+	deliveries, err = store.RouteEventMessage(ctx, eventMessage, 5)
 	if err != nil || len(deliveries) != 1 {
 		t.Fatalf("idempotent route: deliveries=%d err=%v", len(deliveries), err)
 	}
@@ -83,6 +88,79 @@ func TestEventLifecycleIntegration(t *testing.T) {
 	count, err := store.MarkOutboxPublished(ctx, "test-relay", []int64{outbox[0].ID})
 	if err != nil || count != 1 {
 		t.Fatalf("mark outbox: count=%d err=%v", count, err)
+	}
+
+	quarantineParams := domain.QuarantineMessageParams{
+		SourceTopic: "events.ingested", SourcePartition: 3, SourceOffset: 42,
+		MessageKey: []byte("unknown"), Payload: []byte(`not-json`),
+		ErrorMessage: "invalid character", DeadLetterTopic: "events.deadletter",
+	}
+	quarantined, created, err := store.QuarantineMessage(ctx, quarantineParams)
+	if err != nil || !created || quarantined.SourceOffset != 42 {
+		t.Fatalf("quarantine message: created=%v message=%+v err=%v", created, quarantined, err)
+	}
+	duplicateQuarantine, created, err := store.QuarantineMessage(ctx, quarantineParams)
+	if err != nil || created || duplicateQuarantine.ID != quarantined.ID {
+		t.Fatalf("idempotent quarantine: created=%v message=%+v err=%v", created, duplicateQuarantine, err)
+	}
+	deadLetters, err := store.ClaimOutbox(ctx, "dead-letter-relay", 10, time.Minute)
+	if err != nil || len(deadLetters) != 1 || deadLetters[0].Topic != "events.deadletter" {
+		t.Fatalf("claim dead-letter outbox: rows=%d err=%v", len(deadLetters), err)
+	}
+}
+
+func TestConcurrentOutboxClaimsIntegration(t *testing.T) {
+	store := integrationStore(t)
+	ctx := context.Background()
+	tenant, err := store.CreateTenant(ctx, "claim tenant", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		_, created, err := store.CreateEvent(ctx, CreateEventParams{
+			TenantID: tenant.ID, Type: "claim.test", IdempotencyKey: fmt.Sprintf("claim-%d", i),
+			Data: json.RawMessage(`{"ok":true}`), Topic: "events.ingested",
+		})
+		if err != nil || !created {
+			t.Fatalf("create event %d: created=%v err=%v", i, created, err)
+		}
+	}
+
+	type claimResult struct {
+		entries []domain.OutboxEntry
+		err     error
+	}
+	results := make(chan claimResult, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	start := make(chan struct{})
+	for _, owner := range []string{"relay-a", "relay-b"} {
+		owner := owner
+		go func() {
+			ready.Done()
+			<-start
+			entries, err := store.ClaimOutbox(ctx, owner, 6, time.Minute)
+			results <- claimResult{entries: entries, err: err}
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	seen := make(map[int64]struct{}, 10)
+	for i := 0; i < 2; i++ {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("claim outbox: %v", result.err)
+		}
+		for _, entry := range result.entries {
+			if _, duplicate := seen[entry.ID]; duplicate {
+				t.Fatalf("outbox row %d was claimed by both relays", entry.ID)
+			}
+			seen[entry.ID] = struct{}{}
+		}
+	}
+	if len(seen) != 10 {
+		t.Fatalf("expected 10 uniquely claimed rows, got %d", len(seen))
 	}
 }
 
@@ -114,13 +192,22 @@ func integrationStore(t *testing.T) *Store {
 		t.Fatalf("create test pool: %v", err)
 	}
 
-	migrationPath := filepath.Join("..", "..", "..", "migrations", "001_initial_schema.up.sql")
-	migration, err := os.ReadFile(migrationPath)
+	migrationPattern := filepath.Join("..", "..", "..", "migrations", "*.up.sql")
+	migrationPaths, err := filepath.Glob(migrationPattern)
 	if err != nil {
-		t.Fatalf("read migration: %v", err)
+		t.Fatalf("list migrations: %v", err)
 	}
-	if _, err := pool.Exec(ctx, string(migration)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	if len(migrationPaths) == 0 {
+		t.Fatalf("no migrations matched %s", migrationPattern)
+	}
+	for _, migrationPath := range migrationPaths {
+		migration, err := os.ReadFile(migrationPath)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", migrationPath, err)
+		}
+		if _, err := pool.Exec(ctx, string(migration)); err != nil {
+			t.Fatalf("apply migration %s: %v", migrationPath, err)
+		}
 	}
 
 	t.Cleanup(func() {

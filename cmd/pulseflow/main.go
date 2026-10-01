@@ -14,6 +14,7 @@ import (
 	"pulseflow/internal/api/handler"
 	"pulseflow/internal/api/middleware"
 	"pulseflow/internal/config"
+	kafkaruntime "pulseflow/internal/kafka"
 	"pulseflow/internal/platform/logger"
 	postgresstore "pulseflow/internal/store/postgres"
 	redisstore "pulseflow/internal/store/redis"
@@ -54,25 +55,44 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
+	if err := run(ctx, cancel, *mode, cfg, log); err != nil {
+		log.Error("pulseflow stopped with error", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, cancel context.CancelFunc, mode string, cfg *config.Config, log *logger.Logger) error {
+	if mode != "all" && mode != "api" && mode != "worker" {
+		return fmt.Errorf("unknown mode %q", mode)
+	}
+	postgres, err := postgresstore.New(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConn)
+	if err != nil {
+		return fmt.Errorf("connect PostgreSQL: %w", err)
+	}
+	defer postgres.Close()
+
 	var wg sync.WaitGroup
 
-	switch *mode {
+	switch mode {
 	case "all":
-		if err := startAPI(ctx, cancel, &wg, cfg, log); err != nil {
-			log.Error("failed to start API", "error", err)
-			os.Exit(1)
+		if err := startAPI(ctx, cancel, &wg, cfg, log, postgres); err != nil {
+			return fmt.Errorf("start API: %w", err)
 		}
-		startWorker(ctx, &wg, cfg, log)
+		if err := startWorker(ctx, cancel, &wg, cfg, log, postgres); err != nil {
+			cancel()
+			wg.Wait()
+			return fmt.Errorf("start worker: %w", err)
+		}
 	case "api":
-		if err := startAPI(ctx, cancel, &wg, cfg, log); err != nil {
-			log.Error("failed to start API", "error", err)
-			os.Exit(1)
+		if err := startAPI(ctx, cancel, &wg, cfg, log, postgres); err != nil {
+			return fmt.Errorf("start API: %w", err)
 		}
 	case "worker":
-		startWorker(ctx, &wg, cfg, log)
+		if err := startWorker(ctx, cancel, &wg, cfg, log, postgres); err != nil {
+			return fmt.Errorf("start worker: %w", err)
+		}
 	default:
-		log.Error("unknown mode", "mode", *mode)
-		os.Exit(1)
+		return fmt.Errorf("unknown mode %q", mode)
 	}
 
 	// Block until context is cancelled (signal received)
@@ -82,17 +102,12 @@ func main() {
 	// Wait for all goroutine groups to finish
 	wg.Wait()
 	log.Info("shutdown complete")
+	return nil
 }
 
-func startAPI(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGroup, cfg *config.Config, log *logger.Logger) error {
-	postgres, err := postgresstore.New(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConn)
-	if err != nil {
-		return err
-	}
-
+func startAPI(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGroup, cfg *config.Config, log *logger.Logger, postgres *postgresstore.Store) error {
 	redis, err := redisstore.New(cfg.RedisURL)
 	if err != nil {
-		postgres.Close()
 		return err
 	}
 
@@ -112,7 +127,6 @@ func startAPI(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		defer postgres.Close()
 		defer func() {
 			if err := redis.Close(); err != nil {
 				log.Warn("failed to close Redis client", "error", err)
@@ -127,9 +141,89 @@ func startAPI(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGroup
 	return nil
 }
 
-func startWorker(ctx context.Context, wg *sync.WaitGroup, cfg *config.Config, log *logger.Logger) {
-	// Will be implemented in Phase 4-5
-	log.Info("worker engine starting")
+func startWorker(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGroup, cfg *config.Config, log *logger.Logger, postgres *postgresstore.Store) error {
+	producer, err := kafkaruntime.NewProducer(cfg.KafkaBrokerAddresses())
+	if err != nil {
+		return err
+	}
+	reader, err := kafkaruntime.NewReader(kafkaruntime.ReaderConfig{
+		Brokers: cfg.KafkaBrokerAddresses(),
+		GroupID: cfg.KafkaConsumerGroup,
+		Topic:   cfg.KafkaEventsTopic,
+	})
+	if err != nil {
+		_ = producer.Close()
+		return err
+	}
+
+	owner := outboxOwner()
+	relay, err := kafkaruntime.NewOutboxRelay(postgres, producer, kafkaruntime.OutboxRelayConfig{
+		Owner:        owner,
+		BatchSize:    cfg.OutboxBatchSize,
+		Lease:        cfg.OutboxLease,
+		PollInterval: cfg.OutboxPollInterval,
+		RetryDelay:   cfg.OutboxRetryDelay,
+	}, log)
+	if err != nil {
+		_ = reader.Close()
+		_ = producer.Close()
+		return err
+	}
+	consumer, err := kafkaruntime.NewConsumer(reader, postgres, kafkaruntime.ConsumerConfig{
+		DeadLetterTopic: cfg.KafkaDeadLetterTopic,
+		MaxAttempts:     cfg.RetryMaxAttempts,
+		RetryDelay:      cfg.KafkaConsumerRetry,
+	}, log)
+	if err != nil {
+		_ = reader.Close()
+		_ = producer.Close()
+		return err
+	}
+
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	componentErrors := make(chan error, 2)
+	go func() { componentErrors <- relay.Run(workerCtx) }()
+	go func() { componentErrors <- consumer.Run(workerCtx) }()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if err := producer.Close(); err != nil {
+				log.Warn("failed to close Kafka producer", "error", err)
+			}
+			if err := reader.Close(); err != nil {
+				log.Warn("failed to close Kafka reader", "error", err)
+			}
+		}()
+		defer stopWorker()
+
+		for completed := 0; completed < 2; completed++ {
+			err := <-componentErrors
+			if err != nil {
+				log.Error("worker component stopped with error", "error", err)
+				stopWorker()
+				cancel()
+				continue
+			}
+			if ctx.Err() == nil {
+				log.Error("worker component stopped unexpectedly")
+				stopWorker()
+				cancel()
+			}
+		}
+	}()
+
+	log.Info("worker engine started", "outbox_owner", owner, "consumer_group", cfg.KafkaConsumerGroup)
+	return nil
+}
+
+func outboxOwner() string {
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		hostname = "unknown-host"
+	}
+	return fmt.Sprintf("%s-%d", hostname, os.Getpid())
 }
 
 func provision(ctx context.Context, cfg *config.Config, tenantName, keyName string) error {
