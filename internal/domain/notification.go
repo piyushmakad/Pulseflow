@@ -5,6 +5,13 @@ import (
 	"time"
 )
 
+const (
+	NotificationChannelWebhook = "webhook"
+	NotificationChannelEmail   = "email"
+
+	DeliveryDeadLetterMessageVersion = 1
+)
+
 type DeliveryAttemptStatus string
 
 const (
@@ -64,6 +71,7 @@ type DeliveryAttempt struct {
 	LockedBy           *string               `json:"locked_by,omitempty"`
 	LockedUntil        *time.Time            `json:"locked_until,omitempty"`
 	RequestPayload     json.RawMessage       `json:"request_payload,omitempty"`
+	DestinationConfig  json.RawMessage       `json:"destination_config"`
 	ResponseStatus     *int                  `json:"response_status,omitempty"`
 	ResponseBody       *string               `json:"response_body,omitempty"`
 	ErrorMessage       *string               `json:"error_message,omitempty"`
@@ -80,4 +88,21 @@ type DeliveryResult struct {
 	ErrorMessage   *string
 	DurationMs     *int
 	NextRetryAt    *time.Time
+}
+
+// DeliveryDeadLetterMessage is emitted through the transactional outbox when
+// a logical delivery exhausts all of its attempts.
+type DeliveryDeadLetterMessage struct {
+	Version            int                   `json:"version"`
+	DeliveryID         string                `json:"delivery_id"`
+	EventID            string                `json:"event_id"`
+	NotificationRuleID string                `json:"notification_rule_id"`
+	TenantID           string                `json:"tenant_id"`
+	Channel            string                `json:"channel"`
+	AttemptNumber      int                   `json:"attempt_number"`
+	RequestPayload     json.RawMessage       `json:"request_payload,omitempty"`
+	ResponseStatus     *int                  `json:"response_status,omitempty"`
+	ErrorMessage       *string               `json:"error_message,omitempty"`
+	FailedAt           time.Time             `json:"failed_at"`
+	Status             DeliveryAttemptStatus `json:"status"`
 }

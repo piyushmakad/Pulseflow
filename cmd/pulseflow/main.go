@@ -4,20 +4,26 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"pulseflow/internal/admin"
 	"pulseflow/internal/api"
 	"pulseflow/internal/api/handler"
 	"pulseflow/internal/api/middleware"
 	"pulseflow/internal/config"
+	"pulseflow/internal/domain"
 	kafkaruntime "pulseflow/internal/kafka"
 	"pulseflow/internal/platform/logger"
 	postgresstore "pulseflow/internal/store/postgres"
 	redisstore "pulseflow/internal/store/redis"
+	"pulseflow/internal/worker"
+	emailworker "pulseflow/internal/worker/email"
+	webhookworker "pulseflow/internal/worker/webhook"
 )
 
 func main() {
@@ -180,10 +186,77 @@ func startWorker(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGr
 		return err
 	}
 
-	workerCtx, stopWorker := context.WithCancel(ctx)
-	componentErrors := make(chan error, 2)
-	go func() { componentErrors <- relay.Run(workerCtx) }()
-	go func() { componentErrors <- consumer.Run(workerCtx) }()
+	retryPolicy := worker.NewRetryPolicy(cfg.RetryBaseDelay, cfg.RetryMaxDelay)
+	webhookProcessor, err := worker.NewProcessor(
+		postgres, webhookworker.New(&http.Client{}), retryPolicy, owner,
+		cfg.KafkaDeadLetterTopic, cfg.DeliveryPersistenceTimeout, log,
+	)
+	if err != nil {
+		_ = reader.Close()
+		_ = producer.Close()
+		return err
+	}
+	emailProcessor, err := worker.NewProcessor(
+		postgres, emailworker.New(log), retryPolicy, owner,
+		cfg.KafkaDeadLetterTopic, cfg.DeliveryPersistenceTimeout, log,
+	)
+	if err != nil {
+		_ = reader.Close()
+		_ = producer.Close()
+		return err
+	}
+	webhookPool, err := worker.NewPool(cfg.WebhookWorkerCount, cfg.WebhookBufferSize, cfg.WebhookTimeout, webhookProcessor.Handle)
+	if err != nil {
+		_ = reader.Close()
+		_ = producer.Close()
+		return err
+	}
+	emailPool, err := worker.NewPool(cfg.EmailWorkerCount, cfg.EmailBufferSize, cfg.EmailTimeout, emailProcessor.Handle)
+	if err != nil {
+		drainPool(webhookPool)
+		_ = reader.Close()
+		_ = producer.Close()
+		return err
+	}
+	cleanupPools := func() {
+		drainPool(webhookPool)
+		drainPool(emailPool)
+	}
+
+	webhookDispatcher, err := worker.NewDispatcher(postgres, webhookPool, owner, domain.NotificationChannelWebhook,
+		cfg.DeliveryBatchSize, cfg.DeliveryLease, cfg.DeliveryPollInterval, log)
+	if err != nil {
+		cleanupPools()
+		_ = reader.Close()
+		_ = producer.Close()
+		return err
+	}
+	emailDispatcher, err := worker.NewDispatcher(postgres, emailPool, owner, domain.NotificationChannelEmail,
+		cfg.DeliveryBatchSize, cfg.DeliveryLease, cfg.DeliveryPollInterval, log)
+	if err != nil {
+		cleanupPools()
+		_ = reader.Close()
+		_ = producer.Close()
+		return err
+	}
+	maintenance, err := worker.NewMaintenance(postgres, cfg.KafkaDeadLetterTopic, cfg.DeliveryBatchSize,
+		cfg.DeliveryRecoveryInterval, cfg.DeliveryFinalizeInterval, log)
+	if err != nil {
+		cleanupPools()
+		_ = reader.Close()
+		_ = producer.Close()
+		return err
+	}
+	engine, err := worker.NewEngine(
+		[]worker.Runner{relay, consumer, webhookDispatcher, emailDispatcher, maintenance},
+		[]*worker.Pool{webhookPool, emailPool}, cfg.ShutdownTimeout, log,
+	)
+	if err != nil {
+		cleanupPools()
+		_ = reader.Close()
+		_ = producer.Close()
+		return err
+	}
 
 	wg.Add(1)
 	go func() {
@@ -196,26 +269,21 @@ func startWorker(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGr
 				log.Warn("failed to close Kafka reader", "error", err)
 			}
 		}()
-		defer stopWorker()
 
-		for completed := 0; completed < 2; completed++ {
-			err := <-componentErrors
-			if err != nil {
-				log.Error("worker component stopped with error", "error", err)
-				stopWorker()
-				cancel()
-				continue
-			}
-			if ctx.Err() == nil {
-				log.Error("worker component stopped unexpectedly")
-				stopWorker()
-				cancel()
-			}
+		if err := engine.Run(ctx); err != nil {
+			log.Error("worker engine stopped with error", "error", err)
+			cancel()
 		}
 	}()
 
 	log.Info("worker engine started", "outbox_owner", owner, "consumer_group", cfg.KafkaConsumerGroup)
 	return nil
+}
+
+func drainPool(pool *worker.Pool) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = pool.CloseAndDrain(ctx)
 }
 
 func outboxOwner() string {

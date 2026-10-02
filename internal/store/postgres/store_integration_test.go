@@ -71,7 +71,7 @@ func TestEventLifecycleIntegration(t *testing.T) {
 	status := 200
 	_, err = store.RecordDeliveryResult(ctx, claimed[0].ID, "test-worker", domain.DeliveryResult{
 		Status: domain.DeliveryStatusDelivered, ResponseStatus: &status,
-	})
+	}, "events.deadletter")
 	if err != nil {
 		t.Fatalf("record result: %v", err)
 	}
@@ -161,6 +161,82 @@ func TestConcurrentOutboxClaimsIntegration(t *testing.T) {
 	}
 	if len(seen) != 10 {
 		t.Fatalf("expected 10 uniquely claimed rows, got %d", len(seen))
+	}
+}
+
+func TestDeliveryLeaseRecoveryAndDeadLetterIntegration(t *testing.T) {
+	store := integrationStore(t)
+	ctx := context.Background()
+	tenant, err := store.CreateTenant(ctx, "delivery recovery tenant", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	rule, err := store.CreateNotificationRule(ctx, CreateNotificationRuleParams{
+		TenantID: tenant.ID, EventType: "invoice.created", Channel: domain.NotificationChannelWebhook,
+		Config: json.RawMessage(`{"url":"https://original.example/hook"}`),
+	})
+	if err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+	event, _, err := store.CreateEvent(ctx, CreateEventParams{
+		TenantID: tenant.ID, Type: "invoice.created", IdempotencyKey: "invoice-1",
+		Data: json.RawMessage(`{"invoice_id":"1"}`), Topic: "events.ingested",
+	})
+	if err != nil {
+		t.Fatalf("create event: %v", err)
+	}
+	deliveries, err := store.RouteEvent(ctx, event.ID, 2)
+	if err != nil || len(deliveries) != 1 {
+		t.Fatalf("route event: deliveries=%d err=%v", len(deliveries), err)
+	}
+	if !jsonEquivalent(deliveries[0].DestinationConfig, rule.Config) {
+		t.Fatalf("destination snapshot = %s, want %s", deliveries[0].DestinationConfig, rule.Config)
+	}
+	if _, err := store.pool.Exec(ctx, `UPDATE notification_rules SET config='{"url":"https://changed.example/hook"}' WHERE id=$1`, rule.ID); err != nil {
+		t.Fatalf("change rule: %v", err)
+	}
+
+	claimed, err := store.ClaimDueDeliveriesByChannel(ctx, "crashed-worker", domain.NotificationChannelWebhook, 1, 10*time.Millisecond)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim delivery: deliveries=%d err=%v", len(claimed), err)
+	}
+	time.Sleep(25 * time.Millisecond)
+	recovered, err := store.RecoverExpiredDeliveries(ctx, 10, "events.deadletter")
+	if err != nil || len(recovered) != 1 || recovered[0].Status != domain.DeliveryStatusRetrying || recovered[0].AttemptNumber != 1 {
+		t.Fatalf("recover lease: deliveries=%+v err=%v", recovered, err)
+	}
+
+	claimed, err = store.ClaimDueDeliveriesByChannel(ctx, "healthy-worker", domain.NotificationChannelWebhook, 1, time.Minute)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("reclaim delivery: deliveries=%d err=%v", len(claimed), err)
+	}
+	nextRetry := time.Now().Add(time.Second)
+	failed, err := store.RecordDeliveryResult(ctx, claimed[0].ID, "healthy-worker", domain.DeliveryResult{
+		Status: domain.DeliveryStatusRetrying, NextRetryAt: &nextRetry,
+	}, "events.deadletter")
+	if err != nil || failed.Status != domain.DeliveryStatusDeadLetter || failed.AttemptNumber != 2 {
+		t.Fatalf("dead-letter result: delivery=%+v err=%v", failed, err)
+	}
+	status, finalized, err := store.FinalizeEvent(ctx, event.ID)
+	if err != nil || !finalized || status != domain.EventStatusFailed {
+		t.Fatalf("finalize event: status=%s finalized=%v err=%v", status, finalized, err)
+	}
+	outbox, err := store.ClaimOutbox(ctx, "relay", 10, time.Minute)
+	if err != nil || len(outbox) != 2 {
+		t.Fatalf("claim event plus delivery dead-letter outbox: rows=%d err=%v", len(outbox), err)
+	}
+	foundDeadLetter := false
+	for _, entry := range outbox {
+		if entry.Topic == "events.deadletter" {
+			foundDeadLetter = true
+			var message domain.DeliveryDeadLetterMessage
+			if err := json.Unmarshal(entry.Payload, &message); err != nil || message.DeliveryID != failed.ID {
+				t.Fatalf("decode dead-letter payload: message=%+v err=%v", message, err)
+			}
+		}
+	}
+	if !foundDeadLetter {
+		t.Fatal("delivery dead-letter outbox row was not created")
 	}
 }
 

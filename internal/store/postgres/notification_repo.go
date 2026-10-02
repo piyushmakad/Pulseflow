@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -21,6 +23,9 @@ type CreateNotificationRuleParams struct {
 func (s *Store) CreateNotificationRule(ctx context.Context, p CreateNotificationRuleParams) (domain.NotificationRule, error) {
 	if p.TenantID == "" || p.EventType == "" || p.Channel == "" || !json.Valid(p.Config) {
 		return domain.NotificationRule{}, domain.NewValidationError("notification_rule", "tenant_id, event_type, channel, and valid config are required")
+	}
+	if p.Channel != domain.NotificationChannelWebhook && p.Channel != domain.NotificationChannelEmail {
+		return domain.NotificationRule{}, domain.NewValidationError("channel", "must be webhook or email")
 	}
 	var rule domain.NotificationRule
 	err := s.pool.QueryRow(ctx, `
@@ -113,10 +118,11 @@ func (s *Store) routeEvent(ctx context.Context, eventID string, expected *domain
 		for _, rule := range rules {
 			_, err := tx.Exec(ctx, `
 				INSERT INTO delivery_attempts
-				    (event_id, notification_rule_id, tenant_id, channel, max_attempts, request_payload)
-				VALUES ($1, $2, $3, $4, $5, $6)
+				    (event_id, notification_rule_id, tenant_id, channel, max_attempts,
+				     request_payload, destination_config)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)
 				ON CONFLICT (event_id, notification_rule_id) DO NOTHING`,
-				event.ID, rule.ID, event.TenantID, rule.Channel, maxAttempts, event.Data)
+				event.ID, rule.ID, event.TenantID, rule.Channel, maxAttempts, event.Data, rule.Config)
 			if err != nil {
 				return mapError(err)
 			}
@@ -141,6 +147,19 @@ func (s *Store) ListDeliveryAttempts(ctx context.Context, eventID string) ([]dom
 }
 
 func (s *Store) ClaimDueDeliveries(ctx context.Context, owner string, batchSize int, lease time.Duration) ([]domain.DeliveryAttempt, error) {
+	return s.claimDueDeliveries(ctx, owner, "", batchSize, lease)
+}
+
+// ClaimDueDeliveriesByChannel claims only work that can be accepted by the
+// named channel pool. This is the database side of worker-pool backpressure.
+func (s *Store) ClaimDueDeliveriesByChannel(ctx context.Context, owner, channel string, batchSize int, lease time.Duration) ([]domain.DeliveryAttempt, error) {
+	if channel != domain.NotificationChannelWebhook && channel != domain.NotificationChannelEmail {
+		return nil, domain.NewValidationError("channel", "must be webhook or email")
+	}
+	return s.claimDueDeliveries(ctx, owner, channel, batchSize, lease)
+}
+
+func (s *Store) claimDueDeliveries(ctx context.Context, owner, channel string, batchSize int, lease time.Duration) ([]domain.DeliveryAttempt, error) {
 	if owner == "" || batchSize < 1 || lease <= 0 {
 		return nil, domain.NewValidationError("delivery_claim", "owner, positive batch size, and positive lease are required")
 	}
@@ -152,10 +171,10 @@ func (s *Store) ClaimDueDeliveries(ctx context.Context, owner string, batchSize 
 				SELECT id
 				FROM delivery_attempts
 				WHERE attempt_number < max_attempts
+				  AND ($4 = '' OR channel=$4)
 				  AND (
 				      status='pending'
 				      OR (status='retrying' AND next_retry_at <= now())
-				      OR (status='delivering' AND locked_until < now())
 				  )
 				ORDER BY COALESCE(next_retry_at, created_at), created_at, id
 				LIMIT $1
@@ -169,9 +188,10 @@ func (s *Store) ClaimDueDeliveries(ctx context.Context, owner string, batchSize 
 			RETURNING d.id, d.event_id, d.notification_rule_id, d.tenant_id,
 			          d.channel, d.status, d.attempt_number, d.max_attempts,
 			          d.next_retry_at, d.locked_by, d.locked_until,
-			          d.request_payload, d.response_status, d.response_body,
+			          d.request_payload, d.destination_config,
+			          d.response_status, d.response_body,
 			          d.error_message, d.duration_ms, d.created_at, d.updated_at,
-			          d.completed_at`, batchSize, owner, lease.Milliseconds())
+			          d.completed_at`, batchSize, owner, lease.Milliseconds(), channel)
 		if err != nil {
 			return mapError(err)
 		}
@@ -185,9 +205,12 @@ func (s *Store) ClaimDueDeliveries(ctx context.Context, owner string, batchSize 
 	return attempts, nil
 }
 
-func (s *Store) RecordDeliveryResult(ctx context.Context, deliveryID, owner string, result domain.DeliveryResult) (domain.DeliveryAttempt, error) {
+func (s *Store) RecordDeliveryResult(ctx context.Context, deliveryID, owner string, result domain.DeliveryResult, deadLetterTopic string) (domain.DeliveryAttempt, error) {
 	if result.Status != domain.DeliveryStatusDelivered && result.Status != domain.DeliveryStatusFailed && result.Status != domain.DeliveryStatusRetrying {
 		return domain.DeliveryAttempt{}, domain.ErrInvalidStateTransition
+	}
+	if strings.TrimSpace(deadLetterTopic) == "" {
+		return domain.DeliveryAttempt{}, domain.NewValidationError("dead_letter_topic", "is required")
 	}
 
 	var updated domain.DeliveryAttempt
@@ -215,7 +238,8 @@ func (s *Store) RecordDeliveryResult(ctx context.Context, deliveryID, owner stri
 		completed := nextStatus.IsTerminal()
 		err := scanDelivery(tx.QueryRow(ctx, `
 			UPDATE delivery_attempts
-			SET status=$3, attempt_number=$4, next_retry_at=$5,
+			SET status=$3, attempt_number=$4,
+			    next_retry_at=CASE WHEN $3='retrying' THEN $5 ELSE NULL END,
 			    response_status=$6, response_body=$7, error_message=$8,
 			    duration_ms=$9, locked_by=NULL, locked_until=NULL,
 			    completed_at=CASE WHEN $10 THEN now() ELSE NULL END,
@@ -223,19 +247,149 @@ func (s *Store) RecordDeliveryResult(ctx context.Context, deliveryID, owner stri
 			WHERE id=$1 AND locked_by=$2 AND status='delivering'
 			RETURNING id, event_id, notification_rule_id, tenant_id, channel,
 			          status, attempt_number, max_attempts, next_retry_at,
-			          locked_by, locked_until, request_payload, response_status,
+			          locked_by, locked_until, request_payload, destination_config, response_status,
 			          response_body, error_message, duration_ms, created_at,
 			          updated_at, completed_at`,
 			deliveryID, owner, nextStatus, nextAttempt, result.NextRetryAt,
 			result.ResponseStatus, result.ResponseBody, result.ErrorMessage,
 			result.DurationMs, completed,
 		), &updated)
-		return mapError(err)
+		if err != nil {
+			return mapError(err)
+		}
+		if updated.Status == domain.DeliveryStatusDeadLetter {
+			return insertDeliveryDeadLetter(ctx, tx, updated, deadLetterTopic)
+		}
+		return nil
 	})
 	if err != nil {
 		return domain.DeliveryAttempt{}, err
 	}
 	return updated, nil
+}
+
+// RecoverExpiredDeliveries handles workers that died after claiming a row.
+// Lease expiry counts as a failed attempt; exhausted rows and their outbox
+// messages are committed atomically.
+func (s *Store) RecoverExpiredDeliveries(ctx context.Context, limit int, deadLetterTopic string) ([]domain.DeliveryAttempt, error) {
+	if limit < 1 || strings.TrimSpace(deadLetterTopic) == "" {
+		return nil, domain.NewValidationError("delivery_recovery", "positive limit and dead-letter topic are required")
+	}
+
+	var recovered []domain.DeliveryAttempt
+	err := s.withTx(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, deliverySelect+`
+			WHERE id IN (
+				SELECT id FROM delivery_attempts
+				WHERE status='delivering' AND locked_until < now()
+				ORDER BY locked_until, id
+				LIMIT $1 FOR UPDATE SKIP LOCKED
+			)
+			ORDER BY locked_until, id`, limit)
+		if err != nil {
+			return mapError(err)
+		}
+		expired, err := collectDeliveries(rows)
+		rows.Close()
+		if err != nil {
+			return err
+		}
+
+		for _, current := range expired {
+			nextAttempt := current.AttemptNumber + 1
+			nextStatus := domain.DeliveryStatusRetrying
+			if nextAttempt >= current.MaxAttempts {
+				nextStatus = domain.DeliveryStatusDeadLetter
+			}
+			message := fmt.Sprintf("delivery lease expired while owned by %s", valueOrEmpty(current.LockedBy))
+			var updated domain.DeliveryAttempt
+			err := scanDelivery(tx.QueryRow(ctx, `
+				UPDATE delivery_attempts
+				SET status=$2, attempt_number=$3,
+				    next_retry_at=CASE WHEN $2='retrying' THEN now() ELSE NULL END,
+				    error_message=$4, locked_by=NULL, locked_until=NULL,
+				    completed_at=CASE WHEN $2='dead_letter' THEN now() ELSE NULL END,
+				    updated_at=now()
+				WHERE id=$1 AND status='delivering'
+				RETURNING id, event_id, notification_rule_id, tenant_id, channel,
+				          status, attempt_number, max_attempts, next_retry_at,
+				          locked_by, locked_until, request_payload, destination_config,
+				          response_status, response_body, error_message, duration_ms,
+				          created_at, updated_at, completed_at`,
+				current.ID, nextStatus, nextAttempt, message), &updated)
+			if err != nil {
+				return mapError(err)
+			}
+			if updated.Status == domain.DeliveryStatusDeadLetter {
+				if err := insertDeliveryDeadLetter(ctx, tx, updated, deadLetterTopic); err != nil {
+					return err
+				}
+			}
+			recovered = append(recovered, updated)
+		}
+		return nil
+	})
+	return recovered, err
+}
+
+// FinalizeReadyEvents repairs the small gap between storing a terminal
+// delivery and finalizing its parent event (for example, after a DB outage).
+func (s *Store) FinalizeReadyEvents(ctx context.Context, limit int) (int64, error) {
+	if limit < 1 {
+		return 0, domain.NewValidationError("finalize_limit", "must be positive")
+	}
+	result, err := s.pool.Exec(ctx, `
+		WITH ready AS (
+			SELECT e.id,
+			       CASE
+			         WHEN count(*) FILTER (WHERE d.status='delivered') = count(*) THEN 'completed'
+			         WHEN count(*) FILTER (WHERE d.status='delivered') > 0 THEN 'partially_failed'
+			         ELSE 'failed'
+			       END AS final_status
+			FROM events e
+			JOIN delivery_attempts d ON d.event_id=e.id
+			WHERE e.status='processing'
+			GROUP BY e.id
+			HAVING bool_and(d.status IN ('delivered', 'failed', 'dead_letter'))
+			ORDER BY min(d.updated_at), e.id
+			LIMIT $1
+		)
+		UPDATE events e
+		SET status=ready.final_status, processed_at=now(), updated_at=now()
+		FROM ready WHERE e.id=ready.id`, limit)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return result.RowsAffected(), nil
+}
+
+func insertDeliveryDeadLetter(ctx context.Context, tx pgx.Tx, delivery domain.DeliveryAttempt, topic string) error {
+	failedAt := delivery.UpdatedAt
+	if delivery.CompletedAt != nil {
+		failedAt = *delivery.CompletedAt
+	}
+	payload, err := json.Marshal(domain.DeliveryDeadLetterMessage{
+		Version: domain.DeliveryDeadLetterMessageVersion, DeliveryID: delivery.ID,
+		EventID: delivery.EventID, NotificationRuleID: delivery.NotificationRuleID,
+		TenantID: delivery.TenantID, Channel: delivery.Channel,
+		AttemptNumber: delivery.AttemptNumber, RequestPayload: delivery.RequestPayload,
+		ResponseStatus: delivery.ResponseStatus, ErrorMessage: delivery.ErrorMessage,
+		FailedAt: failedAt, Status: delivery.Status,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal delivery dead-letter payload: %w", err)
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO outbox (aggregate_id, topic, partition_key, payload)
+		VALUES ($1, $2, $3, $4)`, delivery.ID, topic, delivery.TenantID, payload)
+	return mapError(err)
+}
+
+func valueOrEmpty(value *string) string {
+	if value == nil {
+		return "unknown worker"
+	}
+	return *value
 }
 
 // FinalizeEvent transitions a processing event only when all deliveries are terminal.
@@ -297,7 +451,7 @@ func (s *Store) FinalizeEvent(ctx context.Context, eventID string) (domain.Event
 const deliverySelect = `
 	SELECT id, event_id, notification_rule_id, tenant_id, channel,
 	       status, attempt_number, max_attempts, next_retry_at,
-	       locked_by, locked_until, request_payload, response_status,
+	       locked_by, locked_until, request_payload, destination_config, response_status,
 	       response_body, error_message, duration_ms, created_at,
 	       updated_at, completed_at
 	FROM delivery_attempts`
@@ -306,8 +460,8 @@ func scanDelivery(row rowScanner, d *domain.DeliveryAttempt) error {
 	return row.Scan(
 		&d.ID, &d.EventID, &d.NotificationRuleID, &d.TenantID, &d.Channel,
 		&d.Status, &d.AttemptNumber, &d.MaxAttempts, &d.NextRetryAt,
-		&d.LockedBy, &d.LockedUntil, &d.RequestPayload, &d.ResponseStatus,
-		&d.ResponseBody, &d.ErrorMessage, &d.DurationMs, &d.CreatedAt,
+		&d.LockedBy, &d.LockedUntil, &d.RequestPayload, &d.DestinationConfig,
+		&d.ResponseStatus, &d.ResponseBody, &d.ErrorMessage, &d.DurationMs, &d.CreatedAt,
 		&d.UpdatedAt, &d.CompletedAt,
 	)
 }

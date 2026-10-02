@@ -17,6 +17,7 @@ Thumbs.db
 
 # Go
 vendor/
+.gocache/
 
 # Test
 coverage.out

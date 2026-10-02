@@ -40,12 +40,18 @@ type Config struct {
 	OutboxRetryDelay   time.Duration `json:"outbox_retry_delay"`
 
 	// Worker pools
-	WebhookWorkerCount int           `json:"webhook_worker_count"`
-	WebhookBufferSize  int           `json:"webhook_buffer_size"`
-	WebhookTimeout     time.Duration `json:"webhook_timeout"`
-	EmailWorkerCount   int           `json:"email_worker_count"`
-	EmailBufferSize    int           `json:"email_buffer_size"`
-	EmailTimeout       time.Duration `json:"email_timeout"`
+	WebhookWorkerCount         int           `json:"webhook_worker_count"`
+	WebhookBufferSize          int           `json:"webhook_buffer_size"`
+	WebhookTimeout             time.Duration `json:"webhook_timeout"`
+	EmailWorkerCount           int           `json:"email_worker_count"`
+	EmailBufferSize            int           `json:"email_buffer_size"`
+	EmailTimeout               time.Duration `json:"email_timeout"`
+	DeliveryPollInterval       time.Duration `json:"delivery_poll_interval"`
+	DeliveryBatchSize          int           `json:"delivery_batch_size"`
+	DeliveryLease              time.Duration `json:"delivery_lease"`
+	DeliveryRecoveryInterval   time.Duration `json:"delivery_recovery_interval"`
+	DeliveryFinalizeInterval   time.Duration `json:"delivery_finalize_interval"`
+	DeliveryPersistenceTimeout time.Duration `json:"delivery_persistence_timeout"`
 
 	// Rate limiting
 	RateLimitRequests int           `json:"rate_limit_requests"`
@@ -54,6 +60,7 @@ type Config struct {
 	// Retry policy
 	RetryMaxAttempts int           `json:"retry_max_attempts"`
 	RetryBaseDelay   time.Duration `json:"retry_base_delay"`
+	RetryMaxDelay    time.Duration `json:"retry_max_delay"`
 
 	// Logging
 	LogLevel  string `json:"log_level"`
@@ -95,12 +102,18 @@ func Load() (*Config, error) {
 		OutboxRetryDelay:   envDuration("OUTBOX_RETRY_DELAY", 5*time.Second),
 
 		// Worker pool defaults
-		WebhookWorkerCount: envInt("WEBHOOK_WORKER_COUNT", 20),
-		WebhookBufferSize:  envInt("WEBHOOK_BUFFER_SIZE", 200),
-		WebhookTimeout:     envDuration("WEBHOOK_TIMEOUT", 30*time.Second),
-		EmailWorkerCount:   envInt("EMAIL_WORKER_COUNT", 5),
-		EmailBufferSize:    envInt("EMAIL_BUFFER_SIZE", 50),
-		EmailTimeout:       envDuration("EMAIL_TIMEOUT", 10*time.Second),
+		WebhookWorkerCount:         envInt("WEBHOOK_WORKER_COUNT", 20),
+		WebhookBufferSize:          envInt("WEBHOOK_BUFFER_SIZE", 200),
+		WebhookTimeout:             envDuration("WEBHOOK_TIMEOUT", 30*time.Second),
+		EmailWorkerCount:           envInt("EMAIL_WORKER_COUNT", 5),
+		EmailBufferSize:            envInt("EMAIL_BUFFER_SIZE", 50),
+		EmailTimeout:               envDuration("EMAIL_TIMEOUT", 10*time.Second),
+		DeliveryPollInterval:       envDuration("DELIVERY_POLL_INTERVAL", 250*time.Millisecond),
+		DeliveryBatchSize:          envInt("DELIVERY_BATCH_SIZE", 50),
+		DeliveryLease:              envDuration("DELIVERY_LEASE", 10*time.Minute),
+		DeliveryRecoveryInterval:   envDuration("DELIVERY_RECOVERY_INTERVAL", 5*time.Second),
+		DeliveryFinalizeInterval:   envDuration("DELIVERY_FINALIZE_INTERVAL", 5*time.Second),
+		DeliveryPersistenceTimeout: envDuration("DELIVERY_PERSISTENCE_TIMEOUT", 5*time.Second),
 
 		// Rate limiting defaults
 		RateLimitRequests: envInt("RATE_LIMIT_REQUESTS", 100),
@@ -109,6 +122,7 @@ func Load() (*Config, error) {
 		// Retry defaults
 		RetryMaxAttempts: envInt("RETRY_MAX_ATTEMPTS", 5),
 		RetryBaseDelay:   envDuration("RETRY_BASE_DELAY", 1*time.Second),
+		RetryMaxDelay:    envDuration("RETRY_MAX_DELAY", 15*time.Minute),
 
 		// Logging defaults
 		LogLevel:  envStr("LOG_LEVEL", "info"),
@@ -153,11 +167,23 @@ func (c *Config) validate() error {
 	if c.OutboxPollInterval <= 0 || c.OutboxBatchSize < 1 || c.OutboxLease <= 0 || c.OutboxRetryDelay <= 0 {
 		return fmt.Errorf("outbox poll interval, batch size, lease, and retry delay must be positive")
 	}
-	if c.WebhookWorkerCount < 1 {
-		return fmt.Errorf("WEBHOOK_WORKER_COUNT must be >= 1")
+	if c.WebhookWorkerCount < 1 || c.WebhookBufferSize < 1 || c.WebhookTimeout <= 0 {
+		return fmt.Errorf("webhook worker count, buffer size, and timeout must be positive")
 	}
-	if c.EmailWorkerCount < 1 {
-		return fmt.Errorf("EMAIL_WORKER_COUNT must be >= 1")
+	if c.EmailWorkerCount < 1 || c.EmailBufferSize < 1 || c.EmailTimeout <= 0 {
+		return fmt.Errorf("email worker count, buffer size, and timeout must be positive")
+	}
+	if c.DeliveryPollInterval <= 0 || c.DeliveryBatchSize < 1 || c.DeliveryLease <= 0 ||
+		c.DeliveryRecoveryInterval <= 0 || c.DeliveryFinalizeInterval <= 0 || c.DeliveryPersistenceTimeout <= 0 {
+		return fmt.Errorf("delivery intervals, batch size, lease, and persistence timeout must be positive")
+	}
+	webhookQueueWait := time.Duration(1+(c.WebhookBufferSize+c.WebhookWorkerCount-1)/c.WebhookWorkerCount) * c.WebhookTimeout
+	emailQueueWait := time.Duration(1+(c.EmailBufferSize+c.EmailWorkerCount-1)/c.EmailWorkerCount) * c.EmailTimeout
+	if c.DeliveryLease <= webhookQueueWait || c.DeliveryLease <= emailQueueWait {
+		return fmt.Errorf("DELIVERY_LEASE must exceed the maximum configured queue wait and delivery timeout")
+	}
+	if c.RetryMaxAttempts < 1 || c.RetryBaseDelay <= 0 || c.RetryMaxDelay < c.RetryBaseDelay {
+		return fmt.Errorf("retry attempts and delays must be positive, and RETRY_MAX_DELAY must be >= RETRY_BASE_DELAY")
 	}
 	return nil
 }
