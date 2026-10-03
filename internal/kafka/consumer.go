@@ -23,20 +23,33 @@ type ConsumerConfig struct {
 }
 
 type Consumer struct {
-	reader Reader
-	store  RoutingStore
-	config ConsumerConfig
-	logger *logger.Logger
+	reader  Reader
+	store   RoutingStore
+	config  ConsumerConfig
+	logger  *logger.Logger
+	metrics ConsumerMetrics
 }
 
-func NewConsumer(reader Reader, store RoutingStore, cfg ConsumerConfig, log *logger.Logger) (*Consumer, error) {
+type ConsumerMetrics interface {
+	RecordKafkaRouted()
+	RecordKafkaQuarantined()
+	RecordKafkaFetchError()
+	RecordKafkaCommitError()
+	RecordKafkaLag(topic string, partition int, lag int64)
+}
+
+func NewConsumer(reader Reader, store RoutingStore, cfg ConsumerConfig, log *logger.Logger, metrics ...ConsumerMetrics) (*Consumer, error) {
 	if reader == nil || store == nil || log == nil {
 		return nil, fmt.Errorf("Kafka reader, routing store, and logger are required")
 	}
 	if cfg.DeadLetterTopic == "" || cfg.MaxAttempts < 1 || cfg.RetryDelay <= 0 {
 		return nil, fmt.Errorf("dead-letter topic, positive max attempts, and retry delay are required")
 	}
-	return &Consumer{reader: reader, store: store, config: cfg, logger: log}, nil
+	consumer := &Consumer{reader: reader, store: store, config: cfg, logger: log}
+	if len(metrics) > 0 {
+		consumer.metrics = metrics[0]
+	}
+	return consumer, nil
 }
 
 func (c *Consumer) Run(ctx context.Context) error {
@@ -45,6 +58,9 @@ func (c *Consumer) Run(ctx context.Context) error {
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
+			}
+			if c.metrics != nil {
+				c.metrics.RecordKafkaFetchError()
 			}
 			c.logger.Error("Kafka fetch failed", "error", err)
 			if !waitFor(ctx, c.config.RetryDelay) {
@@ -66,7 +82,6 @@ func (c *Consumer) Run(ctx context.Context) error {
 				return nil
 			}
 		}
-
 		for {
 			err = c.reader.CommitMessages(ctx, message)
 			if err == nil {
@@ -75,12 +90,18 @@ func (c *Consumer) Run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
+			if c.metrics != nil {
+				c.metrics.RecordKafkaCommitError()
+			}
 			// We retry this commit before fetching another message. Committing a
 			// later offset from the same partition could otherwise skip this one.
 			c.logger.Error("Kafka offset commit failed", "topic", message.Topic, "partition", message.Partition, "offset", message.Offset, "error", err)
 			if !waitFor(ctx, c.config.RetryDelay) {
 				return nil
 			}
+		}
+		if c.metrics != nil {
+			c.metrics.RecordKafkaLag(message.Topic, message.Partition, message.HighWaterMark-message.Offset-1)
 		}
 	}
 }
@@ -94,8 +115,14 @@ func (c *Consumer) processMessage(ctx context.Context, message Message) error {
 		return c.quarantine(ctx, message, fmt.Errorf("validate event message: %w", err))
 	}
 
-	_, err := c.store.RouteEventMessage(ctx, event, c.config.MaxAttempts)
+	deliveries, err := c.store.RouteEventMessage(ctx, event, c.config.MaxAttempts)
 	if err == nil {
+		if c.metrics != nil {
+			c.metrics.RecordKafkaRouted()
+		}
+		c.logger.Info("Kafka event routed", "event_id", event.EventID, "tenant_id", event.TenantID,
+			"topic", message.Topic, "partition", message.Partition, "offset", message.Offset,
+			"delivery_count", len(deliveries))
 		return nil
 	}
 	if errors.Is(err, domain.ErrValidation) || errors.Is(err, domain.ErrNotFound) {
@@ -116,6 +143,9 @@ func (c *Consumer) quarantine(ctx context.Context, message Message, cause error)
 	})
 	if err != nil {
 		return fmt.Errorf("persist quarantined message: %w", err)
+	}
+	if c.metrics != nil {
+		c.metrics.RecordKafkaQuarantined()
 	}
 	c.logger.Warn("Kafka message quarantined", "quarantine_id", quarantined.ID, "created", created, "topic", message.Topic, "partition", message.Partition, "offset", message.Offset, "error", cause)
 	return nil

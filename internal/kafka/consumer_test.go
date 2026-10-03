@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"pulseflow/internal/domain"
+	"pulseflow/internal/observability"
 	"pulseflow/internal/platform/logger"
 )
 
@@ -25,13 +26,18 @@ func TestConsumerCommitsOnlyAfterDurableRouting(t *testing.T) {
 		order = append(order, "route")
 		return nil
 	}}
-	consumer := newTestConsumer(t, reader, store)
+	metrics := observability.NewRegistry()
+	consumer := newTestConsumer(t, reader, store, metrics)
 
 	if err := consumer.Run(ctx); err != nil {
 		t.Fatalf("run consumer: %v", err)
 	}
 	if !reflect.DeepEqual(order, []string{"route", "commit"}) {
 		t.Fatalf("expected route before commit, got %v", order)
+	}
+	snapshot := metrics.Snapshot()
+	if snapshot.KafkaRouted != 1 || snapshot.KafkaLag["events.ingested/1"] != 3 {
+		t.Fatalf("unexpected Kafka metrics: %+v", snapshot)
 	}
 }
 
@@ -52,7 +58,8 @@ func TestConsumerQuarantinesPoisonMessageBeforeCommit(t *testing.T) {
 		}
 		return nil
 	}}
-	consumer := newTestConsumer(t, reader, store)
+	metrics := observability.NewRegistry()
+	consumer := newTestConsumer(t, reader, store, metrics)
 
 	if err := consumer.Run(ctx); err != nil {
 		t.Fatalf("run consumer: %v", err)
@@ -62,6 +69,9 @@ func TestConsumerQuarantinesPoisonMessageBeforeCommit(t *testing.T) {
 	}
 	if store.routeCalls != 0 {
 		t.Fatalf("poison message should not route, calls=%d", store.routeCalls)
+	}
+	if metrics.Snapshot().KafkaQuarantined != 1 {
+		t.Fatalf("quarantine metric = %d, want 1", metrics.Snapshot().KafkaQuarantined)
 	}
 }
 
@@ -110,13 +120,27 @@ func TestConsumerRetriesOffsetCommitBeforeFetchingAgain(t *testing.T) {
 	}
 }
 
-func newTestConsumer(t *testing.T, reader Reader, store RoutingStore) *Consumer {
+func TestConsumerRecordsCommitErrors(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reader := &fakeReader{message: validKafkaMessage(t), commitErrors: []error{errors.New("commit failed"), nil}, onCommit: cancel}
+	metrics := observability.NewRegistry()
+	consumer := newTestConsumer(t, reader, &fakeRoutingStore{}, metrics)
+	if err := consumer.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if metrics.Snapshot().KafkaCommitErrors != 1 {
+		t.Fatalf("commit error metric = %d, want 1", metrics.Snapshot().KafkaCommitErrors)
+	}
+}
+
+func newTestConsumer(t *testing.T, reader Reader, store RoutingStore, metrics ...ConsumerMetrics) *Consumer {
 	t.Helper()
 	consumer, err := NewConsumer(reader, store, ConsumerConfig{
 		DeadLetterTopic: "events.deadletter",
 		MaxAttempts:     5,
 		RetryDelay:      time.Millisecond,
-	}, logger.New("error", "text"))
+	}, logger.New("error", "text"), metrics...)
 	if err != nil {
 		t.Fatalf("new consumer: %v", err)
 	}
@@ -132,7 +156,7 @@ func validKafkaMessage(t *testing.T) Message {
 	if err != nil {
 		t.Fatalf("marshal event: %v", err)
 	}
-	return Message{Topic: "events.ingested", Partition: 1, Offset: 8, Key: []byte("tenant-1"), Value: payload}
+	return Message{Topic: "events.ingested", Partition: 1, Offset: 8, HighWaterMark: 12, Key: []byte("tenant-1"), Value: payload}
 }
 
 type fakeReader struct {

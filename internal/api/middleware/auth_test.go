@@ -31,6 +31,14 @@ type fakeAPIKeyCache struct {
 	putCalls int
 }
 
+type fakeRedisMetrics struct {
+	operations []string
+}
+
+func (m *fakeRedisMetrics) RecordRedisFallback(operation string) {
+	m.operations = append(m.operations, operation)
+}
+
 func (f *fakeAPIKeyCache) GetAPIKey(context.Context, string) (string, string, bool, error) {
 	return f.tenantID, f.apiKeyID, f.found, f.getErr
 }
@@ -69,7 +77,8 @@ func TestAuthUsesCacheHit(t *testing.T) {
 func TestAuthFallsBackToPostgresWhenCacheFails(t *testing.T) {
 	repository := &fakeAPIKeyRepository{key: domain.APIKey{ID: "key-2", TenantID: "tenant-2"}}
 	cache := &fakeAPIKeyCache{getErr: errors.New("redis unavailable")}
-	auth := NewAuth(repository, cache, time.Minute, logger.New("error", "text"))
+	metrics := &fakeRedisMetrics{}
+	auth := NewAuth(repository, cache, time.Minute, logger.New("error", "text"), metrics)
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		principal, _ := PrincipalFromContext(r.Context())
@@ -86,6 +95,9 @@ func TestAuthFallsBackToPostgresWhenCacheFails(t *testing.T) {
 
 	if recorder.Code != http.StatusNoContent || repository.calls != 1 || cache.putCalls != 1 {
 		t.Fatalf("unexpected result: status=%d repository_calls=%d cache_puts=%d", recorder.Code, repository.calls, cache.putCalls)
+	}
+	if len(metrics.operations) != 1 || metrics.operations[0] != "api_key_lookup_error" {
+		t.Fatalf("fallback metrics = %v", metrics.operations)
 	}
 }
 

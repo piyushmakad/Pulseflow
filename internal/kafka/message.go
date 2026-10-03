@@ -8,12 +8,13 @@ import (
 // Message is the small transport-neutral shape used by the relay and its
 // tests. The concrete Kafka client is kept behind Publisher and Reader.
 type Message struct {
-	Topic     string
-	Partition int
-	Offset    int64
-	Key       []byte
-	Value     []byte
-	Time      time.Time
+	Topic         string
+	Partition     int
+	Offset        int64
+	HighWaterMark int64
+	Key           []byte
+	Value         []byte
+	Time          time.Time
 }
 
 type Publisher interface {

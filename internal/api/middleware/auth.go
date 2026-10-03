@@ -35,10 +35,19 @@ type Auth struct {
 	cache      APIKeyCache
 	cacheTTL   time.Duration
 	logger     *logger.Logger
+	metrics    RedisFallbackRecorder
 }
 
-func NewAuth(repository APIKeyRepository, cache APIKeyCache, cacheTTL time.Duration, log *logger.Logger) *Auth {
-	return &Auth{repository: repository, cache: cache, cacheTTL: cacheTTL, logger: log}
+type RedisFallbackRecorder interface {
+	RecordRedisFallback(operation string)
+}
+
+func NewAuth(repository APIKeyRepository, cache APIKeyCache, cacheTTL time.Duration, log *logger.Logger, metrics ...RedisFallbackRecorder) *Auth {
+	auth := &Auth{repository: repository, cache: cache, cacheTTL: cacheTTL, logger: log}
+	if len(metrics) > 0 {
+		auth.metrics = metrics[0]
+	}
+	return auth
 }
 
 func (a *Auth) Middleware(next http.Handler) http.Handler {
@@ -55,10 +64,15 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 		if a.cache != nil {
 			tenantID, apiKeyID, found, err := a.cache.GetAPIKey(r.Context(), hash)
 			if err != nil {
+				if a.metrics != nil {
+					a.metrics.RecordRedisFallback("api_key_lookup_error")
+				}
 				a.logger.Warn("API key cache lookup failed; falling back to PostgreSQL", "error", err)
 			} else if found {
 				next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), Principal{TenantID: tenantID, APIKeyID: apiKeyID})))
 				return
+			} else if a.metrics != nil {
+				a.metrics.RecordRedisFallback("api_key_cache_miss")
 			}
 		}
 

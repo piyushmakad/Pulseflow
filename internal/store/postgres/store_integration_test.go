@@ -240,6 +240,51 @@ func TestDeliveryLeaseRecoveryAndDeadLetterIntegration(t *testing.T) {
 	}
 }
 
+func TestOperationalSnapshotIntegration(t *testing.T) {
+	store := integrationStore(t)
+	ctx := context.Background()
+	tenant, err := store.CreateTenant(ctx, "operational snapshot tenant", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, err = store.CreateNotificationRule(ctx, CreateNotificationRuleParams{
+		TenantID: tenant.ID, EventType: "snapshot.test", Channel: domain.NotificationChannelWebhook,
+		Config: json.RawMessage(`{"url":"https://example.invalid/hook"}`),
+	})
+	if err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+	event, _, err := store.CreateEvent(ctx, CreateEventParams{
+		TenantID: tenant.ID, Type: "snapshot.test", IdempotencyKey: "snapshot-1",
+		Data: json.RawMessage(`{"ok":true}`), Topic: "events.ingested",
+	})
+	if err != nil {
+		t.Fatalf("create event: %v", err)
+	}
+	if _, err := store.RouteEvent(ctx, event.ID, 2); err != nil {
+		t.Fatalf("route event: %v", err)
+	}
+	snapshot, err := store.OperationalSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("operational snapshot: %v", err)
+	}
+	if snapshot.OutboxPending != 1 || snapshot.DueDeliveries != 1 || snapshot.PostgresMax < 1 {
+		t.Fatalf("unexpected operational snapshot: %+v", snapshot)
+	}
+
+	if _, err := store.ClaimOutbox(ctx, "snapshot-relay", 1, 10*time.Millisecond); err != nil {
+		t.Fatalf("claim outbox: %v", err)
+	}
+	if _, err := store.ClaimDueDeliveriesByChannel(ctx, "snapshot-worker", domain.NotificationChannelWebhook, 1, 10*time.Millisecond); err != nil {
+		t.Fatalf("claim delivery: %v", err)
+	}
+	time.Sleep(25 * time.Millisecond)
+	snapshot, err = store.OperationalSnapshot(ctx)
+	if err != nil || snapshot.ExpiredOutboxLeases != 1 || snapshot.ExpiredDeliveryLeases != 1 {
+		t.Fatalf("expired lease snapshot: %+v err=%v", snapshot, err)
+	}
+}
+
 func integrationStore(t *testing.T) *Store {
 	t.Helper()
 	databaseURL := os.Getenv("TEST_DATABASE_URL")

@@ -18,6 +18,7 @@ import (
 	"pulseflow/internal/config"
 	"pulseflow/internal/domain"
 	kafkaruntime "pulseflow/internal/kafka"
+	"pulseflow/internal/observability"
 	"pulseflow/internal/platform/logger"
 	postgresstore "pulseflow/internal/store/postgres"
 	redisstore "pulseflow/internal/store/redis"
@@ -76,30 +77,49 @@ func run(ctx context.Context, cancel context.CancelFunc, mode string, cfg *confi
 		return fmt.Errorf("connect PostgreSQL: %w", err)
 	}
 	defer postgres.Close()
+	metrics := observability.NewRegistry()
+	monitor, err := observability.NewMonitor(postgres, metrics, observability.MonitorConfig{
+		Interval:                  cfg.ObservabilityInterval,
+		QueryTimeout:              cfg.ObservabilityQueryTimeout,
+		OutboxPendingAlert:        cfg.AlertOutboxPending,
+		OutboxOldestAgeAlert:      cfg.AlertOutboxOldestAge,
+		ExpiredOutboxLeaseAlert:   cfg.AlertExpiredOutboxLeases,
+		DueDeliveriesAlert:        cfg.AlertDueDeliveries,
+		ExpiredDeliveryLeaseAlert: cfg.AlertExpiredDeliveryLeases,
+		PostgresPoolAlertRatio:    cfg.AlertPostgresPoolUtilization,
+	}, log)
+	if err != nil {
+		return fmt.Errorf("configure operational monitor: %w", err)
+	}
 
 	var wg sync.WaitGroup
 
 	switch mode {
 	case "all":
-		if err := startAPI(ctx, cancel, &wg, cfg, log, postgres); err != nil {
+		if err := startAPI(ctx, cancel, &wg, cfg, log, postgres, metrics); err != nil {
 			return fmt.Errorf("start API: %w", err)
 		}
-		if err := startWorker(ctx, cancel, &wg, cfg, log, postgres); err != nil {
+		if err := startWorker(ctx, cancel, &wg, cfg, log, postgres, metrics); err != nil {
 			cancel()
 			wg.Wait()
 			return fmt.Errorf("start worker: %w", err)
 		}
 	case "api":
-		if err := startAPI(ctx, cancel, &wg, cfg, log, postgres); err != nil {
+		if err := startAPI(ctx, cancel, &wg, cfg, log, postgres, metrics); err != nil {
 			return fmt.Errorf("start API: %w", err)
 		}
 	case "worker":
-		if err := startWorker(ctx, cancel, &wg, cfg, log, postgres); err != nil {
+		if err := startWorker(ctx, cancel, &wg, cfg, log, postgres, metrics); err != nil {
 			return fmt.Errorf("start worker: %w", err)
 		}
 	default:
 		return fmt.Errorf("unknown mode %q", mode)
 	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = monitor.Run(ctx)
+	}()
 
 	// Block until context is cancelled (signal received)
 	<-ctx.Done()
@@ -111,14 +131,14 @@ func run(ctx context.Context, cancel context.CancelFunc, mode string, cfg *confi
 	return nil
 }
 
-func startAPI(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGroup, cfg *config.Config, log *logger.Logger, postgres *postgresstore.Store) error {
+func startAPI(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGroup, cfg *config.Config, log *logger.Logger, postgres *postgresstore.Store, metrics *observability.Registry) error {
 	redis, err := redisstore.New(cfg.RedisURL)
 	if err != nil {
 		return err
 	}
 
-	auth := middleware.NewAuth(postgres, redis, cfg.APIKeyCacheTTL, log)
-	rateLimit := middleware.NewRateLimit(redis, cfg.RateLimitRequests, cfg.RateLimitWindow, log)
+	auth := middleware.NewAuth(postgres, redis, cfg.APIKeyCacheTTL, log, metrics)
+	rateLimit := middleware.NewRateLimit(redis, cfg.RateLimitRequests, cfg.RateLimitWindow, log, metrics)
 	events := handler.NewEvent(postgres, cfg.KafkaEventsTopic, int64(cfg.HTTPMaxBodyBytes), log)
 	health := handler.NewHealth(postgres, redis, log)
 	router := api.NewRouter(events, health, auth, rateLimit)
@@ -147,7 +167,7 @@ func startAPI(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGroup
 	return nil
 }
 
-func startWorker(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGroup, cfg *config.Config, log *logger.Logger, postgres *postgresstore.Store) error {
+func startWorker(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGroup, cfg *config.Config, log *logger.Logger, postgres *postgresstore.Store, metrics *observability.Registry) error {
 	producer, err := kafkaruntime.NewProducer(cfg.KafkaBrokerAddresses())
 	if err != nil {
 		return err
@@ -169,7 +189,7 @@ func startWorker(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGr
 		Lease:        cfg.OutboxLease,
 		PollInterval: cfg.OutboxPollInterval,
 		RetryDelay:   cfg.OutboxRetryDelay,
-	}, log)
+	}, log, metrics)
 	if err != nil {
 		_ = reader.Close()
 		_ = producer.Close()
@@ -179,7 +199,7 @@ func startWorker(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGr
 		DeadLetterTopic: cfg.KafkaDeadLetterTopic,
 		MaxAttempts:     cfg.RetryMaxAttempts,
 		RetryDelay:      cfg.KafkaConsumerRetry,
-	}, log)
+	}, log, metrics)
 	if err != nil {
 		_ = reader.Close()
 		_ = producer.Close()
@@ -189,7 +209,7 @@ func startWorker(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGr
 	retryPolicy := worker.NewRetryPolicy(cfg.RetryBaseDelay, cfg.RetryMaxDelay)
 	webhookProcessor, err := worker.NewProcessor(
 		postgres, webhookworker.New(&http.Client{}), retryPolicy, owner,
-		cfg.KafkaDeadLetterTopic, cfg.DeliveryPersistenceTimeout, log,
+		cfg.KafkaDeadLetterTopic, cfg.DeliveryPersistenceTimeout, log, metrics,
 	)
 	if err != nil {
 		_ = reader.Close()
@@ -198,7 +218,7 @@ func startWorker(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGr
 	}
 	emailProcessor, err := worker.NewProcessor(
 		postgres, emailworker.New(log), retryPolicy, owner,
-		cfg.KafkaDeadLetterTopic, cfg.DeliveryPersistenceTimeout, log,
+		cfg.KafkaDeadLetterTopic, cfg.DeliveryPersistenceTimeout, log, metrics,
 	)
 	if err != nil {
 		_ = reader.Close()

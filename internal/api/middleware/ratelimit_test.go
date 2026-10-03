@@ -40,7 +40,8 @@ func TestRateLimitRejectsExhaustedTenant(t *testing.T) {
 }
 
 func TestRateLimitFailsOpen(t *testing.T) {
-	middleware := NewRateLimit(fakeRateLimiter{err: errors.New("redis unavailable")}, 100, time.Minute, logger.New("error", "text"))
+	metrics := &fakeRedisMetrics{}
+	middleware := NewRateLimit(fakeRateLimiter{err: errors.New("redis unavailable")}, 100, time.Minute, logger.New("error", "text"), metrics)
 	request := httptest.NewRequest(http.MethodPost, "/v1/events", nil)
 	request = request.WithContext(WithPrincipal(request.Context(), Principal{TenantID: "tenant-1"}))
 	recorder := httptest.NewRecorder()
@@ -51,5 +52,8 @@ func TestRateLimitFailsOpen(t *testing.T) {
 
 	if recorder.Code != http.StatusNoContent {
 		t.Fatalf("expected fail-open 204, got %d", recorder.Code)
+	}
+	if len(metrics.operations) != 1 || metrics.operations[0] != "rate_limit_fail_open" {
+		t.Fatalf("fallback metrics = %v", metrics.operations)
 	}
 }

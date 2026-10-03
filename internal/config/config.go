@@ -62,6 +62,16 @@ type Config struct {
 	RetryBaseDelay   time.Duration `json:"retry_base_delay"`
 	RetryMaxDelay    time.Duration `json:"retry_max_delay"`
 
+	// Operational visibility
+	ObservabilityInterval        time.Duration `json:"observability_interval"`
+	ObservabilityQueryTimeout    time.Duration `json:"observability_query_timeout"`
+	AlertOutboxPending           int64         `json:"alert_outbox_pending"`
+	AlertOutboxOldestAge         time.Duration `json:"alert_outbox_oldest_age"`
+	AlertExpiredOutboxLeases     int64         `json:"alert_expired_outbox_leases"`
+	AlertDueDeliveries           int64         `json:"alert_due_deliveries"`
+	AlertExpiredDeliveryLeases   int64         `json:"alert_expired_delivery_leases"`
+	AlertPostgresPoolUtilization float64       `json:"alert_postgres_pool_utilization"`
+
 	// Logging
 	LogLevel  string `json:"log_level"`
 	LogFormat string `json:"log_format"`
@@ -124,6 +134,16 @@ func Load() (*Config, error) {
 		RetryBaseDelay:   envDuration("RETRY_BASE_DELAY", 1*time.Second),
 		RetryMaxDelay:    envDuration("RETRY_MAX_DELAY", 15*time.Minute),
 
+		// Operational visibility defaults
+		ObservabilityInterval:        envDuration("OBSERVABILITY_INTERVAL", 15*time.Second),
+		ObservabilityQueryTimeout:    envDuration("OBSERVABILITY_QUERY_TIMEOUT", 2*time.Second),
+		AlertOutboxPending:           envInt64("ALERT_OUTBOX_PENDING", 1000),
+		AlertOutboxOldestAge:         envDuration("ALERT_OUTBOX_OLDEST_AGE", 5*time.Minute),
+		AlertExpiredOutboxLeases:     envInt64("ALERT_EXPIRED_OUTBOX_LEASES", 1),
+		AlertDueDeliveries:           envInt64("ALERT_DUE_DELIVERIES", 1000),
+		AlertExpiredDeliveryLeases:   envInt64("ALERT_EXPIRED_DELIVERY_LEASES", 1),
+		AlertPostgresPoolUtilization: envFloat("ALERT_POSTGRES_POOL_UTILIZATION", 0.90),
+
 		// Logging defaults
 		LogLevel:  envStr("LOG_LEVEL", "info"),
 		LogFormat: envStr("LOG_FORMAT", "json"),
@@ -185,6 +205,15 @@ func (c *Config) validate() error {
 	if c.RetryMaxAttempts < 1 || c.RetryBaseDelay <= 0 || c.RetryMaxDelay < c.RetryBaseDelay {
 		return fmt.Errorf("retry attempts and delays must be positive, and RETRY_MAX_DELAY must be >= RETRY_BASE_DELAY")
 	}
+	if c.ObservabilityInterval <= 0 || c.ObservabilityQueryTimeout <= 0 {
+		return fmt.Errorf("observability interval and query timeout must be positive")
+	}
+	if c.AlertOutboxPending < 0 || c.AlertOutboxOldestAge < 0 || c.AlertExpiredOutboxLeases < 0 || c.AlertDueDeliveries < 0 || c.AlertExpiredDeliveryLeases < 0 {
+		return fmt.Errorf("operational alert thresholds cannot be negative")
+	}
+	if c.AlertPostgresPoolUtilization < 0 || c.AlertPostgresPoolUtilization > 1 {
+		return fmt.Errorf("ALERT_POSTGRES_POOL_UTILIZATION must be within [0, 1]")
+	}
 	return nil
 }
 
@@ -215,6 +244,28 @@ func envInt(key string, fallback int) int {
 			return fallback
 		}
 		return i
+	}
+	return fallback
+}
+
+func envInt64(key string, fallback int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		i, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return fallback
+		}
+		return i
+	}
+	return fallback
+}
+
+func envFloat(key string, fallback float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		value, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return fallback
+		}
+		return value
 	}
 	return fallback
 }

@@ -15,8 +15,8 @@ The guides separate two things:
 | 2 | Domain state machines and PostgreSQL repositories | Implemented |
 | 3 | HTTP API, API-key authentication, and rate limiting | Implemented |
 | 4 | Transactional outbox relay and Kafka routing | Implemented |
-| 5 | Bounded workers, webhook delivery, retries, and finalization | Planned |
-| 6 | Operational visibility | Planned |
+| 5 | Bounded workers, webhook delivery, retries, and finalization | Implemented |
+| 6 | Operational visibility | Implemented |
 | 7 | Packaging, deployment, CI, and resilience | Planned |
 
 Start with Phase 1 even if you already know Node project structure. Go's package visibility, explicit error handling, and use of `context.Context` affect every later phase.

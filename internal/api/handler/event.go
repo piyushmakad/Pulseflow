@@ -91,6 +91,9 @@ func (h *Event) Create(w http.ResponseWriter, r *http.Request) {
 	if created {
 		status = http.StatusAccepted
 	}
+	h.logger.Info("event persisted", "event_id", event.ID, "tenant_id", event.TenantID,
+		"event_type", event.Type, "status", event.Status, "created", created,
+		"request_id", middleware.RequestIDFromContext(r.Context()))
 	response.JSON(w, status, eventEnvelope{Data: event, Created: created})
 }
 

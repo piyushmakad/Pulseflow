@@ -40,12 +40,13 @@ func (r *KafkaReader) FetchMessage(ctx context.Context) (Message, error) {
 		return Message{}, err
 	}
 	return Message{
-		Topic:     message.Topic,
-		Partition: message.Partition,
-		Offset:    message.Offset,
-		Key:       message.Key,
-		Value:     message.Value,
-		Time:      message.Time,
+		Topic:         message.Topic,
+		Partition:     message.Partition,
+		Offset:        message.Offset,
+		HighWaterMark: message.HighWaterMark,
+		Key:           message.Key,
+		Value:         message.Value,
+		Time:          message.Time,
 	}, nil
 }
 

@@ -19,10 +19,15 @@ type RateLimit struct {
 	capacity int
 	window   time.Duration
 	logger   *logger.Logger
+	metrics  RedisFallbackRecorder
 }
 
-func NewRateLimit(limiter TenantRateLimiter, capacity int, window time.Duration, log *logger.Logger) *RateLimit {
-	return &RateLimit{limiter: limiter, capacity: capacity, window: window, logger: log}
+func NewRateLimit(limiter TenantRateLimiter, capacity int, window time.Duration, log *logger.Logger, metrics ...RedisFallbackRecorder) *RateLimit {
+	rateLimit := &RateLimit{limiter: limiter, capacity: capacity, window: window, logger: log}
+	if len(metrics) > 0 {
+		rateLimit.metrics = metrics[0]
+	}
+	return rateLimit
 }
 
 func (m *RateLimit) Middleware(next http.Handler) http.Handler {
@@ -35,6 +40,9 @@ func (m *RateLimit) Middleware(next http.Handler) http.Handler {
 
 		allowed, remaining, err := m.limiter.Allow(r.Context(), principal.TenantID, m.capacity, m.window)
 		if err != nil {
+			if m.metrics != nil {
+				m.metrics.RecordRedisFallback("rate_limit_fail_open")
+			}
 			m.logger.Warn("rate limiter unavailable; allowing request", "tenant_id", principal.TenantID, "error", err)
 			next.ServeHTTP(w, r)
 			return

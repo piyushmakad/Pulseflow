@@ -30,16 +30,25 @@ type OutboxRelay struct {
 	publisher Publisher
 	config    OutboxRelayConfig
 	logger    *logger.Logger
+	metrics   OutboxMetrics
 }
 
-func NewOutboxRelay(store OutboxStore, publisher Publisher, cfg OutboxRelayConfig, log *logger.Logger) (*OutboxRelay, error) {
+type OutboxMetrics interface {
+	RecordOutboxPublish(published, failed int)
+}
+
+func NewOutboxRelay(store OutboxStore, publisher Publisher, cfg OutboxRelayConfig, log *logger.Logger, metrics ...OutboxMetrics) (*OutboxRelay, error) {
 	if store == nil || publisher == nil || log == nil {
 		return nil, fmt.Errorf("outbox store, publisher, and logger are required")
 	}
 	if strings.TrimSpace(cfg.Owner) == "" || cfg.BatchSize < 1 || cfg.Lease <= 0 || cfg.PollInterval <= 0 || cfg.RetryDelay <= 0 {
 		return nil, fmt.Errorf("outbox owner, positive batch size, lease, poll interval, and retry delay are required")
 	}
-	return &OutboxRelay{store: store, publisher: publisher, config: cfg, logger: log}, nil
+	relay := &OutboxRelay{store: store, publisher: publisher, config: cfg, logger: log}
+	if len(metrics) > 0 {
+		relay.metrics = metrics[0]
+	}
+	return relay, nil
 }
 
 func (r *OutboxRelay) Run(ctx context.Context) error {
@@ -95,6 +104,9 @@ func (r *OutboxRelay) processBatch(ctx context.Context) (int, error) {
 		failedIDs = append(failedIDs, entries[i].ID)
 		publishErrors = append(publishErrors, result)
 	}
+	if r.metrics != nil {
+		r.metrics.RecordOutboxPublish(len(publishedIDs), len(failedIDs))
+	}
 
 	var stateErrors []error
 	if len(publishedIDs) > 0 {
@@ -116,10 +128,11 @@ func (r *OutboxRelay) processBatch(ctx context.Context) (int, error) {
 	}
 
 	if len(publishedIDs) > 0 {
-		r.logger.Info("outbox messages published", "count", len(publishedIDs))
+		r.logger.Info("outbox messages published", "count", len(publishedIDs), "relay_owner", r.config.Owner)
 	}
 	if len(failedIDs) > 0 {
-		r.logger.Warn("outbox messages scheduled for retry", "count", len(failedIDs), "error", compactErrors(publishErrors))
+		r.logger.Warn("outbox messages scheduled for retry", "count", len(failedIDs),
+			"relay_owner", r.config.Owner, "error", compactErrors(publishErrors))
 	}
 	return len(entries), errors.Join(stateErrors...)
 }

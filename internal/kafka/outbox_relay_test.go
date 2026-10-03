@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"pulseflow/internal/domain"
+	"pulseflow/internal/observability"
 	"pulseflow/internal/platform/logger"
 )
 
@@ -16,7 +17,8 @@ func TestOutboxRelayMarksSuccessfulMessagesAndReleasesFailures(t *testing.T) {
 		{ID: 2, Topic: "events.ingested", PartitionKey: "tenant-2", Payload: []byte(`{"event_id":"2"}`)},
 	}}
 	publisher := &fakePublisher{results: []error{nil, errors.New("Kafka unavailable")}}
-	relay := newTestRelay(t, store, publisher)
+	metrics := observability.NewRegistry()
+	relay := newTestRelay(t, store, publisher, metrics)
 
 	count, err := relay.processBatch(context.Background())
 	if err != nil {
@@ -33,6 +35,9 @@ func TestOutboxRelayMarksSuccessfulMessagesAndReleasesFailures(t *testing.T) {
 	}
 	if store.releaseCause != "Kafka unavailable" {
 		t.Fatalf("unexpected retry cause %q", store.releaseCause)
+	}
+	if snapshot := metrics.Snapshot(); snapshot.OutboxPublished != 1 || snapshot.OutboxPublishFailed != 1 {
+		t.Fatalf("unexpected outbox metrics: %+v", snapshot)
 	}
 }
 
@@ -69,7 +74,7 @@ func TestOutboxRelayReleasesWholeBatchWhenKafkaIsUnavailable(t *testing.T) {
 	}
 }
 
-func newTestRelay(t *testing.T, store OutboxStore, publisher Publisher) *OutboxRelay {
+func newTestRelay(t *testing.T, store OutboxStore, publisher Publisher, metrics ...OutboxMetrics) *OutboxRelay {
 	t.Helper()
 	relay, err := NewOutboxRelay(store, publisher, OutboxRelayConfig{
 		Owner:        "relay-test",
@@ -77,7 +82,7 @@ func newTestRelay(t *testing.T, store OutboxStore, publisher Publisher) *OutboxR
 		Lease:        time.Minute,
 		PollInterval: time.Millisecond,
 		RetryDelay:   time.Second,
-	}, logger.New("error", "text"))
+	}, logger.New("error", "text"), metrics...)
 	if err != nil {
 		t.Fatalf("new relay: %v", err)
 	}
