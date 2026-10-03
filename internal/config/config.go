@@ -17,6 +17,7 @@ type Config struct {
 	HTTPWriteTimeout time.Duration `json:"http_write_timeout"`
 	HTTPIdleTimeout  time.Duration `json:"http_idle_timeout"`
 	HTTPMaxBodyBytes int           `json:"http_max_body_bytes"`
+	HealthPort       int           `json:"health_port"`
 
 	// PostgreSQL
 	DatabaseURL     string `json:"database_url"`
@@ -89,6 +90,7 @@ func Load() (*Config, error) {
 		HTTPWriteTimeout: envDuration("HTTP_WRITE_TIMEOUT", 30*time.Second),
 		HTTPIdleTimeout:  envDuration("HTTP_IDLE_TIMEOUT", 60*time.Second),
 		HTTPMaxBodyBytes: envInt("HTTP_MAX_BODY_BYTES", 1<<20),
+		HealthPort:       envInt("HEALTH_PORT", 9090),
 
 		// PostgreSQL defaults
 		DatabaseURL:     envStr("DATABASE_URL", "postgres://pulseflow:pulseflow@localhost:5432/pulseflow?sslmode=disable"),
@@ -162,6 +164,9 @@ func Load() (*Config, error) {
 func (c *Config) validate() error {
 	if c.HTTPPort < 1 || c.HTTPPort > 65535 {
 		return fmt.Errorf("invalid HTTP_PORT: %d", c.HTTPPort)
+	}
+	if c.HealthPort < 1 || c.HealthPort > 65535 {
+		return fmt.Errorf("invalid HEALTH_PORT: %d", c.HealthPort)
 	}
 	if c.DatabaseURL == "" {
 		return fmt.Errorf("DATABASE_URL is required")

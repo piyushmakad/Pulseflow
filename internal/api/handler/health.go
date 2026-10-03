@@ -31,7 +31,7 @@ func (h *Health) Ready(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 
-	checks := map[string]string{"postgres": "ok", "redis": "ok"}
+	checks := map[string]string{"postgres": "ok"}
 	if err := h.postgres.Ping(ctx); err != nil {
 		checks["postgres"] = "unavailable"
 		h.logger.Error("readiness PostgreSQL check failed", "error", err)
@@ -44,6 +44,7 @@ func (h *Health) Ready(w http.ResponseWriter, r *http.Request) {
 
 	status := "ready"
 	if h.redis != nil {
+		checks["redis"] = "ok"
 		if err := h.redis.Ping(ctx); err != nil {
 			checks["redis"] = "degraded"
 			status = "degraded"

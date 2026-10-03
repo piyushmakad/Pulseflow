@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pulseflow
+  labels:
+    app.kubernetes.io/part-of: pulseflow
+    pod-security.kubernetes.io/enforce: baseline

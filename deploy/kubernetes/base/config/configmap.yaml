@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pulseflow-config
+data:
+  HTTP_PORT: "8080"
+  HEALTH_PORT: "9090"
+  DATABASE_MAX_CONN: "5"
+  KAFKA_BROKERS: "kafka:9092"
+  KAFKA_EVENTS_TOPIC: "events.ingested"
+  KAFKA_DEADLETTER_TOPIC: "events.deadletter"
+  KAFKA_CONSUMER_GROUP: "pulseflow-workers"
+  OUTBOX_BATCH_SIZE: "20"
+  WEBHOOK_WORKER_COUNT: "4"
+  WEBHOOK_BUFFER_SIZE: "32"
+  EMAIL_WORKER_COUNT: "1"
+  EMAIL_BUFFER_SIZE: "8"
+  DELIVERY_BATCH_SIZE: "20"
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+  SHUTDOWN_TIMEOUT: "30s"

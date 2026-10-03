@@ -17,7 +17,7 @@ The guides separate two things:
 | 4 | Transactional outbox relay and Kafka routing | Implemented |
 | 5 | Bounded workers, webhook delivery, retries, and finalization | Implemented |
 | 6 | Operational visibility | Implemented |
-| 7 | Packaging, deployment, CI, and resilience | Planned |
+| 7 | Packaging, deployment, CI, and resilience | Implemented |
 
 Start with Phase 1 even if you already know Node project structure. Go's package visibility, explicit error handling, and use of `context.Context` affect every later phase.
 

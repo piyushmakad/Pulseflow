@@ -4,6 +4,7 @@ bin/
 
 # Environment
 .env
+deploy/kubernetes/**/secret.yaml
 
 # IDE
 .idea/

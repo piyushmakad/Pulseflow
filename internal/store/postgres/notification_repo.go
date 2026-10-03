@@ -238,8 +238,8 @@ func (s *Store) RecordDeliveryResult(ctx context.Context, deliveryID, owner stri
 		completed := nextStatus.IsTerminal()
 		err := scanDelivery(tx.QueryRow(ctx, `
 			UPDATE delivery_attempts
-			SET status=$3, attempt_number=$4,
-			    next_retry_at=CASE WHEN $3='retrying' THEN $5 ELSE NULL END,
+			SET status=$3::varchar, attempt_number=$4,
+			    next_retry_at=CASE WHEN $3::varchar='retrying' THEN $5 ELSE NULL END,
 			    response_status=$6, response_body=$7, error_message=$8,
 			    duration_ms=$9, locked_by=NULL, locked_until=NULL,
 			    completed_at=CASE WHEN $10 THEN now() ELSE NULL END,
@@ -305,10 +305,10 @@ func (s *Store) RecoverExpiredDeliveries(ctx context.Context, limit int, deadLet
 			var updated domain.DeliveryAttempt
 			err := scanDelivery(tx.QueryRow(ctx, `
 				UPDATE delivery_attempts
-				SET status=$2, attempt_number=$3,
-				    next_retry_at=CASE WHEN $2='retrying' THEN now() ELSE NULL END,
+				SET status=$2::varchar, attempt_number=$3,
+				    next_retry_at=CASE WHEN $2::varchar='retrying' THEN now() ELSE NULL END,
 				    error_message=$4, locked_by=NULL, locked_until=NULL,
-				    completed_at=CASE WHEN $2='dead_letter' THEN now() ELSE NULL END,
+				    completed_at=CASE WHEN $2::varchar='dead_letter' THEN now() ELSE NULL END,
 				    updated_at=now()
 				WHERE id=$1 AND status='delivering'
 				RETURNING id, event_id, notification_rule_id, tenant_id, channel,

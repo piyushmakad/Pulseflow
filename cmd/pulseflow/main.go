@@ -20,6 +20,7 @@ import (
 	kafkaruntime "pulseflow/internal/kafka"
 	"pulseflow/internal/observability"
 	"pulseflow/internal/platform/logger"
+	"pulseflow/internal/platform/migration"
 	postgresstore "pulseflow/internal/store/postgres"
 	redisstore "pulseflow/internal/store/redis"
 	"pulseflow/internal/worker"
@@ -28,7 +29,7 @@ import (
 )
 
 func main() {
-	command := flag.String("command", "run", "Command: run or provision")
+	command := flag.String("command", "run", "Command: run, migrate, or provision")
 	mode := flag.String("mode", "all", "Run mode: all, api, worker")
 	tenantName := flag.String("tenant-name", "Local Development", "Tenant name used by the provision command")
 	keyName := flag.String("key-name", "default", "API key name used by the provision command")
@@ -46,6 +47,14 @@ func main() {
 		"mode", *mode,
 		"version", version(),
 	)
+	if *command == "migrate" {
+		if err := migration.Up(cfg.DatabaseURL); err != nil {
+			log.Error("migration failed", "error", err)
+			os.Exit(1)
+		}
+		log.Info("database migrations are current")
+		return
+	}
 	if *command == "provision" {
 		if err := provision(context.Background(), cfg, *tenantName, *keyName); err != nil {
 			log.Error("provision failed", "error", err)
@@ -112,6 +121,7 @@ func run(ctx context.Context, cancel context.CancelFunc, mode string, cfg *confi
 		if err := startWorker(ctx, cancel, &wg, cfg, log, postgres, metrics); err != nil {
 			return fmt.Errorf("start worker: %w", err)
 		}
+		startWorkerHealth(ctx, cancel, &wg, cfg, log, postgres)
 	default:
 		return fmt.Errorf("unknown mode %q", mode)
 	}
@@ -129,6 +139,32 @@ func run(ctx context.Context, cancel context.CancelFunc, mode string, cfg *confi
 	wg.Wait()
 	log.Info("shutdown complete")
 	return nil
+}
+
+// startWorkerHealth gives a background-only worker process HTTP probes without
+// exposing the event API. PostgreSQL controls readiness because it is the
+// durable source of truth; Kafka outages are handled by retries and backlog.
+func startWorkerHealth(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGroup, cfg *config.Config, log *logger.Logger, postgres *postgresstore.Store) {
+	health := handler.NewHealth(postgres, nil, log)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", health.Live)
+	mux.HandleFunc("GET /readyz", health.Ready)
+	server := api.NewServer(api.ServerConfig{
+		Port:            cfg.HealthPort,
+		ReadTimeout:     cfg.HTTPReadTimeout,
+		WriteTimeout:    cfg.HTTPWriteTimeout,
+		IdleTimeout:     cfg.HTTPIdleTimeout,
+		ShutdownTimeout: cfg.ShutdownTimeout,
+	}, mux, log)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := server.Run(ctx); err != nil {
+			log.Error("worker health server stopped with error", "error", err)
+			cancel()
+		}
+	}()
 }
 
 func startAPI(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGroup, cfg *config.Config, log *logger.Logger, postgres *postgresstore.Store, metrics *observability.Registry) error {

@@ -12,8 +12,8 @@ import (
 type Tenant struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
-	Status    string    `json:"status"` // "active" or "suspended"
-	Config    []byte    `json:"config"` // JSONB stored as raw bytes (like Buffer in Node)
+	Status    string    `json:"status"`     // "active" or "suspended"
+	Config    []byte    `json:"config"`     // JSONB stored as raw bytes (like Buffer in Node)
 	CreatedAt time.Time `json:"created_at"` // time.Time is Go's equivalent to JS Date
 	UpdatedAt time.Time `json:"updated_at"`
 }

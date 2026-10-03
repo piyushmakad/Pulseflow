@@ -1,0 +1,11 @@
+.git
+.github
+.gocache
+.env
+bin
+coverage.out
+coverage.html
+docs
+outputs
+tmp
+*.md

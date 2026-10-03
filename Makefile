@@ -1,4 +1,4 @@
-.PHONY: help dev infra-up infra-down migrate-up migrate-down build run test lint clean
+.PHONY: help dev infra-up infra-down migrate-up migrate-down build docker-build docker-build-multiarch run test lint clean
 
 # Default
 help: ## Show this help
@@ -16,7 +16,7 @@ infra-reset: ## Reset infrastructure (destroy volumes)
 
 # Database migrations (requires golang-migrate CLI)
 migrate-up: ## Run database migrations
-	migrate -path ./migrations -database "$(DATABASE_URL)" up
+	go run ./cmd/pulseflow --command=migrate
 
 migrate-down: ## Rollback database migrations
 	migrate -path ./migrations -database "$(DATABASE_URL)" down
@@ -24,6 +24,12 @@ migrate-down: ## Rollback database migrations
 # Application
 build: ## Build the binary
 	go build -o bin/pulseflow ./cmd/pulseflow
+
+docker-build: ## Build the local PulseFlow container image
+	docker build -t pulseflow:dev .
+
+docker-build-multiarch: ## Verify amd64 and arm64 images build (does not push)
+	docker buildx build --platform linux/amd64,linux/arm64 --output type=cacheonly .
 
 run: ## Run with default mode (all)
 	go run ./cmd/pulseflow
