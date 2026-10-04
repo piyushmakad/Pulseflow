@@ -15,7 +15,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: create-topics
-          image: confluentinc/cp-kafka:7.9.10
+          image: docker.io/confluentinc/cp-kafka:7.9.10
           imagePullPolicy: IfNotPresent
           command: ["sh", "-c"]
           args:

@@ -43,7 +43,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: kafka
-          image: confluentinc/cp-kafka:7.9.10
+          image: docker.io/confluentinc/cp-kafka:7.9.10
           imagePullPolicy: IfNotPresent
           ports:
             - name: broker
