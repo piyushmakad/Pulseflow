@@ -41,6 +41,19 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+      initContainers:
+        - name: prepare-kafka-storage
+          image: docker.io/confluentinc/cp-kafka:7.9.10
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args: ["mkdir -p /var/lib/kafka/storage/logs"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/storage
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
       containers:
         - name: kafka
           image: docker.io/confluentinc/cp-kafka:7.9.10
@@ -78,7 +91,10 @@ spec:
             - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
               value: "false"
             - name: KAFKA_LOG_DIRS
-              value: /var/lib/kafka/data
+              # OCI Block Volumes use ext4 and expose lost+found at the
+              # filesystem root. Kafka log directories may contain only Kafka
+              # data, so keep its logs in a dedicated child directory.
+              value: /var/lib/kafka/storage/logs
             - name: KAFKA_HEAP_OPTS
               value: -Xms512m -Xmx1g
             - name: CLUSTER_ID
@@ -106,7 +122,7 @@ spec:
               memory: 2Gi
           volumeMounts:
             - name: data
-              mountPath: /var/lib/kafka/data
+              mountPath: /var/lib/kafka/storage
           securityContext:
             allowPrivilegeEscalation: false
   volumeClaimTemplates:
