@@ -278,6 +278,10 @@ CI verifies:
 
 The test suite covers state transitions, idempotency, transaction rollback, concurrent work claiming, Kafka publication and quarantine behavior, bounded worker pools, retry classification, graceful shutdown, Redis fallbacks, and alert transitions.
 
+### Postman
+
+Import the collection and safe environment template from [`postman/`](postman/README.md) to run the deployed API contract end to end. The collection tests health, authentication, event creation and lookup, idempotent replay, and idempotency conflicts without storing an API key in Git.
+
 ## Kubernetes and Oracle OKE
 
 The Kubernetes resources preserve the same modular-monolith boundary:
