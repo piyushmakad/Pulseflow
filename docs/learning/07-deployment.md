@@ -40,9 +40,9 @@ Local development
     ├── Kafka in KRaft mode
     └── PulseFlow started from the terminal
 
-Oracle Free deployment
+Oracle learning deployment
 └── OKE Basic
-    └── ARM64 worker node
+    └── single Flex worker node
         ├── API Deployment
         ├── Worker Deployment
         ├── PostgreSQL StatefulSet + volume
@@ -227,7 +227,10 @@ API and worker rollout
 
 This preserves an explicit schema/deployment boundary.
 
-## Oracle Free infrastructure files
+The image supports both `linux/arm64` for Always Free A1 capacity and
+`linux/amd64` for x86 Flex workers used with trial credits or paid accounts.
+
+## Oracle infrastructure files
 
 `deploy/kubernetes/oracle-free/infra` is separate so a future paid environment
 can replace these single-instance dependencies without changing the app.
@@ -289,7 +292,7 @@ credentials are not assumed or added without a release decision.
 
 ## Free profile versus production-grade Oracle
 
-Oracle is the chosen provider, but the free profile is not highly available.
+Oracle is the chosen provider, but the cost-conscious profile is not highly available.
 Real production also requires multiple nodes, HA PostgreSQL, three replicated
 Kafka brokers, tested backups/restores, TLS/DNS, operator alert delivery and
 load/failure testing. These improve infrastructure availability without

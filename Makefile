@@ -1,4 +1,7 @@
-.PHONY: help dev infra-up infra-down migrate-up migrate-down build docker-build docker-build-multiarch run test lint clean
+.PHONY: help dev infra-up infra-down migrate-up migrate-down build docker-build docker-build-multiarch docker-push-ocir run test lint clean k8s-check k8s-render k8s-namespace k8s-infra k8s-migrate k8s-app k8s-status
+
+OCIR_IMAGE ?= bom.ocir.io/bm7wpbkcaaqu/pulseflow
+IMAGE_TAG ?= 0.1.0
 
 # Default
 help: ## Show this help
@@ -31,6 +34,9 @@ docker-build: ## Build the local PulseFlow container image
 docker-build-multiarch: ## Verify amd64 and arm64 images build (does not push)
 	docker buildx build --platform linux/amd64,linux/arm64 --output type=cacheonly .
 
+docker-push-ocir: ## Build and push the release image to OCI Container Registry
+	docker buildx build --platform linux/amd64,linux/arm64 -t $(OCIR_IMAGE):$(IMAGE_TAG) --push .
+
 run: ## Run with default mode (all)
 	go run ./cmd/pulseflow
 
@@ -53,6 +59,41 @@ test-short: ## Run unit tests only
 # Quality
 lint: ## Run linter
 	golangci-lint run ./...
+
+# Oracle OKE deployment
+k8s-check: ## Verify cluster access, nodes, system pods, and storage classes
+	kubectl get nodes -o wide
+	kubectl get pods -A
+	kubectl get storageclass
+
+k8s-render: ## Render all Oracle manifests locally without applying them
+	kubectl kustomize deploy/kubernetes/oracle-free/infra
+	kubectl kustomize deploy/kubernetes/oracle-free/migration
+	kubectl kustomize deploy/kubernetes/oracle-free/app
+
+k8s-namespace: ## Create the PulseFlow Kubernetes namespace
+	kubectl apply -f deploy/kubernetes/oracle-free/namespace.yaml
+
+k8s-infra: ## Deploy PostgreSQL, Redis, Kafka, and Kafka topics
+	kubectl apply -k deploy/kubernetes/oracle-free/infra
+	kubectl rollout status statefulset/postgres -n pulseflow --timeout=5m
+	kubectl rollout status statefulset/kafka -n pulseflow --timeout=10m
+	kubectl rollout status deployment/redis -n pulseflow --timeout=5m
+	kubectl wait --for=condition=complete job/kafka-topics -n pulseflow --timeout=10m
+
+k8s-migrate: ## Run the release database migration as a one-shot Job
+	kubectl delete job pulseflow-migrate -n pulseflow --ignore-not-found
+	kubectl apply -k deploy/kubernetes/oracle-free/migration
+	kubectl wait --for=condition=complete job/pulseflow-migrate -n pulseflow --timeout=5m
+	kubectl logs job/pulseflow-migrate -n pulseflow
+
+k8s-app: ## Deploy the PulseFlow API and worker after migration succeeds
+	kubectl apply -k deploy/kubernetes/oracle-free/app
+	kubectl rollout status deployment/pulseflow-api -n pulseflow --timeout=5m
+	kubectl rollout status deployment/pulseflow-worker -n pulseflow --timeout=5m
+
+k8s-status: ## Show PulseFlow workloads, storage, and external service address
+	kubectl get all,pvc -n pulseflow
 
 # Cleanup
 clean: ## Remove build artifacts

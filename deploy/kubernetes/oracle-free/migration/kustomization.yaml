@@ -6,5 +6,5 @@ resources:
   - ../../base/migration
 images:
   - name: pulseflow
-    newName: bom.ocir.io/replace-with-tenancy-namespace/pulseflow
+    newName: bom.ocir.io/bm7wpbkcaaqu/pulseflow
     newTag: 0.1.0

@@ -1,23 +1,29 @@
-# Deploy PulseFlow to Oracle OKE Free
+# Deploy PulseFlow to Oracle OKE
 
-This profile runs PulseFlow on an OKE Basic cluster backed by an Always Free
-`VM.Standard.A1.Flex` ARM64 node. It is suitable for learning and a persistent
-demo, but it is not highly available.
+This profile runs PulseFlow on a single-node OKE Basic cluster. Prefer an
+Always Free `VM.Standard.A1.Flex` node when capacity exists. A paid x86 Flex
+shape can be used temporarily with Free Trial credits when A1 capacity is
+unavailable. This setup is suitable for learning, but it is not highly
+available.
 
 ## 1. Create Oracle resources
 
 In the OCI Console:
 
 1. Create a `pulseflow` compartment in the tenancy home region.
-2. Create an OKE cluster using **Quick Create**.
+2. Create an OKE Basic cluster.
 3. Select a public Kubernetes API endpoint and private managed workers.
-4. Select `VM.Standard.A1.Flex`, one node, 4 OCPUs and 24 GB memory.
+4. For Always Free, select `VM.Standard.A1.Flex`, one node, 2 OCPUs and 12 GB
+   memory in the tenancy home region. If Oracle reports
+   `OUT_OF_HOST_CAPACITY`, wait for capacity or knowingly use a paid trial
+   shape such as `VM.Standard.E3.Flex`.
 5. Keep the boot volume at 50 GB.
-6. On the final screen, explicitly choose **Create a Basic cluster**.
+6. Attach the generated worker NSG to the node pool.
 7. Create a private OCI Container Registry repository named `pulseflow`.
 
-Do not select an Enhanced cluster or non-A1 worker shape if the goal is to stay
-inside the free allowances.
+Do not select an Enhanced cluster if the goal is to avoid the paid OKE control
+plane. Non-A1 worker shapes consume trial credits or incur charges on a paid
+account.
 
 ## 2. Configure kubectl
 
@@ -30,25 +36,19 @@ kubectl get nodes
 kubectl get nodes -o jsonpath='{.items[*].status.nodeInfo.architecture}'
 ```
 
-The node architecture should be `arm64`.
+The node architecture is `arm64` for A1 workers and `amd64` for E3/E5/E6
+workers. The PulseFlow container is published for both architectures.
 
-## 3. Set the registry path
+## 3. Registry path
 
-Edit both files:
-
-```text
-deploy/kubernetes/oracle-free/app/kustomization.yaml
-deploy/kubernetes/oracle-free/migration/kustomization.yaml
-```
-
-Replace:
+The Oracle overlays use this Mumbai OCIR repository:
 
 ```text
-bom.ocir.io/replace-with-tenancy-namespace/pulseflow
+bom.ocir.io/bm7wpbkcaaqu/pulseflow
 ```
 
-with the actual repository. `bom.ocir.io` is the Mumbai endpoint; use the OCI
-endpoint for the tenancy's home region if it differs.
+Change both overlay `kustomization.yaml` files if the tenancy namespace or
+region changes.
 
 ## 4. Build and push the image
 
@@ -57,16 +57,15 @@ Create an OCI auth token and log in. OCI usernames commonly use
 
 ```bash
 docker login bom.ocir.io
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -t bom.ocir.io/TENANCY_NAMESPACE/pulseflow:0.1.0 --push .
+make docker-push-ocir
 ```
 
-The ARM64 variant runs on Ampere; AMD64 remains usable locally.
+This publishes both ARM64 and AMD64 variants under the same version tag.
 
 ## 5. Create namespace and secrets
 
 ```bash
-kubectl apply -f deploy/kubernetes/oracle-free/namespace.yaml
+make k8s-namespace
 ```
 
 Create the registry pull secret without storing its auth token in Git:
@@ -98,12 +97,7 @@ URL-encoded.
 ## 6. Deploy stateful infrastructure
 
 ```bash
-kubectl apply -k deploy/kubernetes/oracle-free/infra
-kubectl rollout status statefulset/postgres -n pulseflow --timeout=5m
-kubectl rollout status statefulset/kafka -n pulseflow --timeout=10m
-kubectl rollout status deployment/redis -n pulseflow --timeout=5m
-kubectl wait --for=condition=complete job/kafka-topics \
-  -n pulseflow --timeout=10m
+make k8s-infra
 kubectl get pvc -n pulseflow
 ```
 
@@ -115,11 +109,7 @@ Job templates contain immutable fields, so remove the previous completed Job
 before creating the next release's migration Job:
 
 ```bash
-kubectl delete job pulseflow-migrate -n pulseflow --ignore-not-found
-kubectl apply -k deploy/kubernetes/oracle-free/migration
-kubectl wait --for=condition=complete job/pulseflow-migrate \
-  -n pulseflow --timeout=5m
-kubectl logs job/pulseflow-migrate -n pulseflow
+make k8s-migrate
 ```
 
 Do not deploy the application if this Job fails.
@@ -127,10 +117,8 @@ Do not deploy the application if this Job fails.
 ## 8. Deploy API and workers
 
 ```bash
-kubectl apply -k deploy/kubernetes/oracle-free/app
-kubectl rollout status deployment/pulseflow-api -n pulseflow --timeout=5m
-kubectl rollout status deployment/pulseflow-worker -n pulseflow --timeout=5m
-kubectl get pods -n pulseflow
+make k8s-app
+make k8s-status
 ```
 
 ## 9. Get the API address
