@@ -39,7 +39,7 @@ func TestEventAPIIntegration(t *testing.T) {
 	}
 
 	auth := middleware.NewAuth(store, nil, time.Minute, log)
-	rateLimit := middleware.NewRateLimit(allowAllRateLimiter{}, 100, time.Minute, log)
+	rateLimit := middleware.NewRateLimit(allowAllRateLimiter{}, 100, time.Minute, "", log)
 	events := handler.NewEvent(store, "events.ingested", 1<<20, log)
 	health := handler.NewHealth(store, nil, log)
 	server := httptest.NewServer(api.NewRouter(events, health, auth, rateLimit))

@@ -55,8 +55,9 @@ type Config struct {
 	DeliveryPersistenceTimeout time.Duration `json:"delivery_persistence_timeout"`
 
 	// Rate limiting
-	RateLimitRequests int           `json:"rate_limit_requests"`
-	RateLimitWindow   time.Duration `json:"rate_limit_window"`
+	RateLimitRequests       int           `json:"rate_limit_requests"`
+	RateLimitWindow         time.Duration `json:"rate_limit_window"`
+	RateLimitBypassTenantID string        `json:"rate_limit_bypass_tenant_id"`
 
 	// Retry policy
 	RetryMaxAttempts int           `json:"retry_max_attempts"`
@@ -128,8 +129,9 @@ func Load() (*Config, error) {
 		DeliveryPersistenceTimeout: envDuration("DELIVERY_PERSISTENCE_TIMEOUT", 5*time.Second),
 
 		// Rate limiting defaults
-		RateLimitRequests: envInt("RATE_LIMIT_REQUESTS", 100),
-		RateLimitWindow:   envDuration("RATE_LIMIT_WINDOW", 60*time.Second),
+		RateLimitRequests:       envInt("RATE_LIMIT_REQUESTS", 100),
+		RateLimitWindow:         envDuration("RATE_LIMIT_WINDOW", 60*time.Second),
+		RateLimitBypassTenantID: strings.TrimSpace(os.Getenv("RATE_LIMIT_BYPASS_TENANT_ID")),
 
 		// Retry defaults
 		RetryMaxAttempts: envInt("RETRY_MAX_ATTEMPTS", 5),

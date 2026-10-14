@@ -15,15 +15,19 @@ type TenantRateLimiter interface {
 }
 
 type RateLimit struct {
-	limiter  TenantRateLimiter
-	capacity int
-	window   time.Duration
-	logger   *logger.Logger
-	metrics  RedisFallbackRecorder
+	limiter        TenantRateLimiter
+	capacity       int
+	window         time.Duration
+	logger         *logger.Logger
+	metrics        RedisFallbackRecorder
+	bypassTenantID string
 }
 
-func NewRateLimit(limiter TenantRateLimiter, capacity int, window time.Duration, log *logger.Logger, metrics ...RedisFallbackRecorder) *RateLimit {
-	rateLimit := &RateLimit{limiter: limiter, capacity: capacity, window: window, logger: log}
+func NewRateLimit(limiter TenantRateLimiter, capacity int, window time.Duration, bypassTenantID string, log *logger.Logger, metrics ...RedisFallbackRecorder) *RateLimit {
+	rateLimit := &RateLimit{limiter: limiter, capacity: capacity, window: window, bypassTenantID: bypassTenantID, logger: log}
+	if bypassTenantID != "" {
+		log.Warn("rate limit bypass enabled for test tenant", "tenant_id", bypassTenantID)
+	}
 	if len(metrics) > 0 {
 		rateLimit.metrics = metrics[0]
 	}
@@ -35,6 +39,13 @@ func (m *RateLimit) Middleware(next http.Handler) http.Handler {
 		principal, ok := PrincipalFromContext(r.Context())
 		if !ok {
 			response.Error(w, http.StatusUnauthorized, "unauthorized", "authenticated tenant is missing")
+			return
+		}
+
+		// Only the authenticated principal can select the bypass, never a request header or body.
+		if m.bypassTenantID != "" && principal.TenantID == m.bypassTenantID {
+			w.Header().Set("X-RateLimit-Bypassed", "true")
+			next.ServeHTTP(w, r)
 			return
 		}
 

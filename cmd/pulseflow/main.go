@@ -174,7 +174,7 @@ func startAPI(ctx context.Context, cancel context.CancelFunc, wg *sync.WaitGroup
 	}
 
 	auth := middleware.NewAuth(postgres, redis, cfg.APIKeyCacheTTL, log, metrics)
-	rateLimit := middleware.NewRateLimit(redis, cfg.RateLimitRequests, cfg.RateLimitWindow, log, metrics)
+	rateLimit := middleware.NewRateLimit(redis, cfg.RateLimitRequests, cfg.RateLimitWindow, cfg.RateLimitBypassTenantID, log, metrics)
 	events := handler.NewEvent(postgres, cfg.KafkaEventsTopic, int64(cfg.HTTPMaxBodyBytes), log)
 	health := handler.NewHealth(postgres, redis, log)
 	router := api.NewRouter(events, health, auth, rateLimit)
